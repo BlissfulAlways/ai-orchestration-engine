@@ -1,10 +1,10 @@
-package com.orchestrator.engine;
+package com.orchestrator.ai_orchestrator;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 
 @SpringBootTest
-class EngineApplicationTests {
+class AiOrchestratorApplicationTests {
 
 	@Test
 	void contextLoads() {
