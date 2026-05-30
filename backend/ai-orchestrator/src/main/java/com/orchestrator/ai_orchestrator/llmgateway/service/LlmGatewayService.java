@@ -57,21 +57,33 @@ public class LlmGatewayService {
             );
 
             promptJson = objectMapper.writeValueAsString(requestBody);
+            responseBody = sendRequest(promptJson);
 
-            HttpClient httpClient = HttpClient.newHttpClient();
+            JsonNode jsonNode = objectMapper.readTree(responseBody);
 
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(endpoint + "/" + model + ":generateContent"))
-                    .header("Content-Type", "application/json")
-                    .header("x-goog-api-key", apiKey)
-                    .POST(HttpRequest.BodyPublishers.ofString(promptJson))
-                    .build();
+            if (jsonNode.has("error")) {
+                int errorCode = jsonNode.get("error").get("code").asInt();
 
-            HttpResponse<String> httpResponse = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            responseBody = httpResponse.body();
+                if (errorCode == 429) {
+                    int retryDelaySecs = extractRetryDelay(jsonNode);
+                    log.warn("Rate limited by Gemini. Waiting {}s before retry. component={}",
+                            retryDelaySecs, callingComponent);
+                    Thread.sleep((retryDelaySecs + 2) * 1000L);
+                    responseBody = sendRequest(promptJson);
+                    jsonNode = objectMapper.readTree(responseBody);
+
+                    if (jsonNode.has("error")) {
+                        throw new RuntimeException("Gemini still rate limited after retry: "
+                                + jsonNode.get("error").get("message").asText());
+                    }
+                } else {
+                    throw new RuntimeException("Gemini error " + errorCode + ": "
+                            + jsonNode.get("error").get("message").asText());
+                }
+            }
 
             log.info("Gemini raw response: {}", responseBody);
-            JsonNode jsonNode = objectMapper.readTree(responseBody);
+
             String responseText = jsonNode
                     .get("candidates")
                     .get(0)
@@ -86,7 +98,7 @@ public class LlmGatewayService {
                     .get("totalTokenCount")
                     .asInt();
 
-            LlmCallLog log = LlmCallLog.builder()
+            LlmCallLog callLog = LlmCallLog.builder()
                     .callingComponent(callingComponent)
                     .modelName(model)
                     .prompt(promptJson)
@@ -96,7 +108,7 @@ public class LlmGatewayService {
                     .createdAt(LocalDateTime.now())
                     .build();
 
-            llmCallLogRepository.save(log);
+            llmCallLogRepository.save(callLog);
 
             return responseText;
 
@@ -117,5 +129,36 @@ public class LlmGatewayService {
 
             throw new RuntimeException("LLM call failed for component: " + callingComponent, e);
         }
+    }
+
+    private String sendRequest(String promptJson) throws Exception {
+        HttpClient httpClient = HttpClient.newHttpClient();
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(endpoint + "/" + model + ":generateContent"))
+                .header("Content-Type", "application/json")
+                .header("x-goog-api-key", apiKey)
+                .POST(HttpRequest.BodyPublishers.ofString(promptJson))
+                .build();
+        HttpResponse<String> httpResponse = httpClient.send(request,
+                HttpResponse.BodyHandlers.ofString());
+        return httpResponse.body();
+    }
+
+    private int extractRetryDelay(JsonNode jsonNode) {
+        try {
+            JsonNode details = jsonNode.get("error").get("details");
+            if (details != null && details.isArray()) {
+                for (JsonNode detail : details) {
+                    if ("type.googleapis.com/google.rpc.RetryInfo"
+                            .equals(detail.get("@type").asText())) {
+                        String retryDelay = detail.get("retryDelay").asText();
+                        return Integer.parseInt(retryDelay.replace("s", "").trim());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Could not extract retryDelay from Gemini response, defaulting to 60s");
+        }
+        return 60;
     }
 }
