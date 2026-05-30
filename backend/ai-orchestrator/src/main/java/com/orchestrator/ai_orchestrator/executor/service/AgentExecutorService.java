@@ -44,39 +44,34 @@ public class AgentExecutorService {
     @Scheduled(fixedDelay = 5000)
     public void pollAndExecute() {
         for (String agentType : List.of("WEB_SEARCH_AGENT", "SUMMARIZER_AGENT", "WRITER_AGENT")) {
-            Optional<QueuedTask> pendingTask = taskQueueRepository
-                    .findFirstByStatusAndRequiredAgentTypeOrderByQueuedAtAsc(
-                            QueuedTaskStatus.PENDING, agentType);
+            Optional<QueuedTask> pickedTask = taskQueueRepository
+                    .atomicPickup(agentType, LocalDateTime.now());
 
-            if (pendingTask.isEmpty()) continue;
+            if (pickedTask.isEmpty()) continue;
 
-            QueuedTask task = pendingTask.get();
-            task.setStatus(QueuedTaskStatus.PROCESSING);
-            task.setPickedUpAt(LocalDateTime.now());
-            taskQueueRepository.save(task);
-
-            executeTask(task);
+            executeTask(pickedTask.get());
         }
     }
 
     @Scheduled(fixedDelay = 60000)
     public void rescueStuckTasks() {
-        List<QueuedTask> allProcessingTasks = taskQueueRepository.findByJobId(null);
-
         taskQueueRepository.findAll().stream()
                 .filter(t -> t.getStatus() == QueuedTaskStatus.PROCESSING)
                 .filter(t -> t.getPickedUpAt() != null &&
-                        t.getPickedUpAt().isBefore(LocalDateTime.now().minusMinutes(STUCK_TASK_TIMEOUT_MINUTES)))
+                        t.getPickedUpAt().isBefore(
+                                LocalDateTime.now().minusMinutes(STUCK_TASK_TIMEOUT_MINUTES)))
                 .forEach(stuckTask -> {
                     if (stuckTask.getRetryCount() < MAX_RETRY_COUNT) {
                         stuckTask.setStatus(QueuedTaskStatus.PENDING);
                         stuckTask.setRetryCount(stuckTask.getRetryCount() + 1);
                         stuckTask.setPickedUpAt(null);
-                        log.warn("Rescued stuck task id={} retryCount={}", stuckTask.getId(), stuckTask.getRetryCount());
+                        log.warn("Rescued stuck task id={} retryCount={}",
+                                stuckTask.getId(), stuckTask.getRetryCount());
                     } else {
                         stuckTask.setStatus(QueuedTaskStatus.FAILED);
                         writeFailedResult(stuckTask, "EXECUTOR_TIMEOUT");
-                        log.error("Task permanently failed after max retries id={}", stuckTask.getId());
+                        log.error("Task permanently failed after max retries id={}",
+                                stuckTask.getId());
                     }
                     taskQueueRepository.save(stuckTask);
                 });
@@ -131,14 +126,16 @@ public class AgentExecutorService {
             aggregatorTriggerService.checkAndTrigger(queuedTask.getJobId());
 
         } catch (Exception e) {
-            log.error("Task execution failed taskQueueId={} error={}", queuedTask.getId(), e.getMessage());
+            log.error("Task execution failed taskQueueId={} error={}",
+                    queuedTask.getId(), e.getMessage());
 
             if (queuedTask.getRetryCount() < MAX_RETRY_COUNT) {
                 queuedTask.setStatus(QueuedTaskStatus.PENDING);
                 queuedTask.setRetryCount(queuedTask.getRetryCount() + 1);
                 queuedTask.setPickedUpAt(null);
                 taskQueueRepository.save(queuedTask);
-                log.warn("Task reset to PENDING for retry retryCount={}", queuedTask.getRetryCount());
+                log.warn("Task reset to PENDING for retry retryCount={}",
+                        queuedTask.getRetryCount());
             } else {
                 markTaskFailed(queuedTask, e.getMessage());
                 aggregatorTriggerService.checkAndTrigger(queuedTask.getJobId());
@@ -152,7 +149,8 @@ public class AgentExecutorService {
         writeFailedResult(queuedTask, reason);
         observerService.emit("AGENT_EXECUTOR", "TASK_EXECUTION_FAILED",
                 queuedTask.getJobId(),
-                Map.of("taskQueueId", queuedTask.getId().toString(), "reason", reason));
+                Map.of("taskQueueId", queuedTask.getId().toString(),
+                        "reason", reason));
     }
 
     private void writeFailedResult(QueuedTask queuedTask, String reason) {
