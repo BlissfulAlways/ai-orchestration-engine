@@ -9,6 +9,7 @@ import com.orchestrator.ai_orchestrator.llmgateway.service.LlmGatewayService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -26,6 +27,7 @@ public class PlannerService {
     private final ObserverService observerService;
     private final ObjectMapper objectMapper;
 
+    @Transactional
     public List<PlannedTask> plan(UUID jobId, String goal) {
         try {
             observerService.emit("TASK_PLANNER", "PLANNING_STARTED", jobId,

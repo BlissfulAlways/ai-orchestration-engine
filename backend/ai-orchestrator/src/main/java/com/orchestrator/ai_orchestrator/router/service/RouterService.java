@@ -10,6 +10,7 @@ import com.orchestrator.ai_orchestrator.taskqueue.infrastructure.TaskQueueReposi
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -26,6 +27,7 @@ public class RouterService {
     private final TaskQueueRepository taskQueueRepository;
     private final ObserverService observerService;
 
+    @Transactional
     public void route(UUID jobId) {
         try {
             observerService.emit("TASK_ROUTER", "ROUTING_STARTED", jobId,
