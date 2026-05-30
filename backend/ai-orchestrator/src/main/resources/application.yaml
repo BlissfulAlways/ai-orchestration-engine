@@ -10,8 +10,8 @@ spring:
 
   jpa:
     hibernate:
-      ddl-auto: validate
-    show-sql: true
+      ddl-auto: none
+    show-sql: false
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
@@ -24,5 +24,5 @@ spring:
 gemini:
   api:
     key: ${GEMINI_API_KEY}
-    model: gemini-1.5-flash
+    model: gemini-2.5-flash
     endpoint: https://generativelanguage.googleapis.com/v1beta/models

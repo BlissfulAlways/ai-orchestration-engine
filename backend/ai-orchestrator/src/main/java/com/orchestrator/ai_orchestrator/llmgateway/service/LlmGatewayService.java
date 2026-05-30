@@ -70,6 +70,7 @@ public class LlmGatewayService {
             HttpResponse<String> httpResponse = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             responseBody = httpResponse.body();
 
+            log.info("Gemini raw response: {}", responseBody);
             JsonNode jsonNode = objectMapper.readTree(responseBody);
             String responseText = jsonNode
                     .get("candidates")

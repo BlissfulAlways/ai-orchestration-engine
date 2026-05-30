@@ -2,6 +2,8 @@ package com.orchestrator.ai_orchestrator.executor.domain;
 
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 import java.time.LocalDateTime;
 import java.util.UUID;
 
@@ -33,6 +35,7 @@ public class AgentExecutionStep {
     @Column(name = "tool_called", nullable = true)
     private String toolCalled;
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "tool_result", nullable = true, columnDefinition = "jsonb")
     private String toolResult;
 

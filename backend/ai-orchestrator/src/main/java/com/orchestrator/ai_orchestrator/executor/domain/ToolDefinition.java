@@ -2,6 +2,8 @@ package com.orchestrator.ai_orchestrator.executor.domain;
 
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 import java.time.LocalDateTime;
 import java.util.UUID;
 
@@ -27,6 +29,7 @@ public class ToolDefinition {
     @Column(name = "tool_identifier", nullable = false, unique = true)
     private String toolIdentifier;
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "input_schema", nullable = false, columnDefinition = "jsonb")
     private String inputSchema;
 

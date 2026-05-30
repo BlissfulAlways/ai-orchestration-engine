@@ -25,7 +25,7 @@ public class AgentRegistryEntry {
     private String agentType;
 
     @Type(ListArrayType.class)
-    @Column(name = "supported_task_types", nullable = false, columnDefinition = "TEXT[]")
+    @Column(name = "supported_task_types", nullable = false)
     private List<String> supportedTaskTypes;
 
     @Column(name = "endpoint", nullable = false)
