@@ -3,7 +3,6 @@ package com.orchestrator.ai_orchestrator.taskqueue.infrastructure;
 import com.orchestrator.ai_orchestrator.taskqueue.domain.QueuedTask;
 import com.orchestrator.ai_orchestrator.taskqueue.domain.QueuedTaskStatus;
 import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -18,7 +17,6 @@ import java.util.UUID;
 public interface TaskQueueRepository extends JpaRepository<QueuedTask, UUID> {
 
     @Transactional
-    @Modifying
     @Query(value = """
             UPDATE task_queue
             SET status = 'PROCESSING', picked_up_at = :pickedUpAt

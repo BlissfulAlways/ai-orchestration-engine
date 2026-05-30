@@ -79,7 +79,7 @@ public class PlannerService {
             return savedTasks;
 
         } catch (Exception e) {
-            log.error("PlannerService failed for jobId={} error={}", jobId, e.getMessage());
+            log.error("PlannerService failed for jobId={} error={}", jobId, e.getMessage(), e);
             observerService.emit("TASK_PLANNER", "PLANNING_FAILED", jobId,
                     Map.of("jobId", jobId.toString(), "error", e.getMessage()));
             throw new RuntimeException("Planning failed for jobId: " + jobId, e);

@@ -16,6 +16,7 @@ import java.net.http.HttpResponse;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Semaphore;
 
 @Slf4j
 @Service
@@ -24,6 +25,8 @@ public class LlmGatewayService {
 
     private final LlmCallLogRepository llmCallLogRepository;
     private final ObjectMapper objectMapper;
+
+    private final Semaphore rateLimiter = new Semaphore(1);
 
     @Value("${gemini.api.key}")
     private String apiKey;
@@ -39,93 +42,102 @@ public class LlmGatewayService {
         String responseBody = null;
 
         try {
-            Map<String, Object> requestBody = Map.of(
-                "contents", List.of(
-                    Map.of(
-                        "role", "user",
-                        "parts", List.of(Map.of("text", systemPrompt))
-                    ),
-                    Map.of(
-                        "role", "model",
-                        "parts", List.of(Map.of("text", "Understood. I will follow these instructions."))
-                    ),
-                    Map.of(
-                        "role", "user",
-                        "parts", List.of(Map.of("text", userPrompt))
+            rateLimiter.acquire();
+
+            try {
+                Map<String, Object> requestBody = Map.of(
+                    "contents", List.of(
+                        Map.of(
+                            "role", "user",
+                            "parts", List.of(Map.of("text", systemPrompt))
+                        ),
+                        Map.of(
+                            "role", "model",
+                            "parts", List.of(Map.of("text", "Understood. I will follow these instructions."))
+                        ),
+                        Map.of(
+                            "role", "user",
+                            "parts", List.of(Map.of("text", userPrompt))
+                        )
                     )
-                )
-            );
+                );
 
-            promptJson = objectMapper.writeValueAsString(requestBody);
-            responseBody = sendRequest(promptJson);
+                promptJson = objectMapper.writeValueAsString(requestBody);
+                responseBody = sendRequest(promptJson);
+                JsonNode jsonNode = objectMapper.readTree(responseBody);
 
-            JsonNode jsonNode = objectMapper.readTree(responseBody);
-
-            if (jsonNode.has("error")) {
-                int errorCode = jsonNode.get("error").get("code").asInt();
-
-                if (errorCode == 429) {
-                    int retryDelaySecs = extractRetryDelay(jsonNode);
-                    log.warn("Rate limited by Gemini. Waiting {}s before retry. component={}",
-                            retryDelaySecs, callingComponent);
-                    Thread.sleep((retryDelaySecs + 2) * 1000L);
-                    responseBody = sendRequest(promptJson);
-                    jsonNode = objectMapper.readTree(responseBody);
-
-                    if (jsonNode.has("error")) {
-                        throw new RuntimeException("Gemini still rate limited after retry: "
+                int attempts = 0;
+                while (jsonNode.has("error") && attempts < 5) {
+                    int errorCode = jsonNode.get("error").get("code").asInt();
+                    if (errorCode != 429 && errorCode != 503) {
+                        throw new RuntimeException("Gemini error " + errorCode + ": "
                                 + jsonNode.get("error").get("message").asText());
                     }
-                } else {
-                    throw new RuntimeException("Gemini error " + errorCode + ": "
+                    attempts++;
+                    int waitSecs = extractRetryDelay(jsonNode);
+                    log.warn("Gemini unavailable. Attempt {} of 5. Waiting {}s. component={}",
+                            attempts, waitSecs, callingComponent);
+                    Thread.sleep(waitSecs * 1000L);
+                    responseBody = sendRequest(promptJson);
+                    jsonNode = objectMapper.readTree(responseBody);
+                }
+
+                if (jsonNode.has("error")) {
+                    throw new RuntimeException("Gemini still failing after 5 retries: "
                             + jsonNode.get("error").get("message").asText());
                 }
+
+                log.info("Gemini call succeeded component={}", callingComponent);
+
+                String responseText = jsonNode
+                        .get("candidates")
+                        .get(0)
+                        .get("content")
+                        .get("parts")
+                        .get(0)
+                        .get("text")
+                        .asText();
+
+                int tokensUsed = jsonNode
+                        .get("usageMetadata")
+                        .get("totalTokenCount")
+                        .asInt();
+
+                LlmCallLog callLog = LlmCallLog.builder()
+                        .callingComponent(callingComponent)
+                        .modelName(model)
+                        .prompt(promptJson)
+                        .response(responseBody)
+                        .tokensUsed(tokensUsed)
+                        .status("SUCCESS")
+                        .createdAt(LocalDateTime.now())
+                        .build();
+
+                llmCallLogRepository.save(callLog);
+
+                return responseText;
+
+            } finally {
+                rateLimiter.release();
             }
 
-            log.info("Gemini raw response: {}", responseBody);
-
-            String responseText = jsonNode
-                    .get("candidates")
-                    .get(0)
-                    .get("content")
-                    .get("parts")
-                    .get(0)
-                    .get("text")
-                    .asText();
-
-            int tokensUsed = jsonNode
-                    .get("usageMetadata")
-                    .get("totalTokenCount")
-                    .asInt();
-
-            LlmCallLog callLog = LlmCallLog.builder()
-                    .callingComponent(callingComponent)
-                    .modelName(model)
-                    .prompt(promptJson)
-                    .response(responseBody)
-                    .tokensUsed(tokensUsed)
-                    .status("SUCCESS")
-                    .createdAt(LocalDateTime.now())
-                    .build();
-
-            llmCallLogRepository.save(callLog);
-
-            return responseText;
-
         } catch (Exception e) {
-            log.error("LlmGateway call failed: component={} error={}", callingComponent, e.getMessage());
+            log.error("LlmGateway call failed: component={} error={}", callingComponent, e.getMessage(), e);
 
-            LlmCallLog failedLog = LlmCallLog.builder()
-                    .callingComponent(callingComponent)
-                    .modelName(model)
-                    .prompt(promptJson != null ? promptJson : "{}")
-                    .response(responseBody)
-                    .tokensUsed(null)
-                    .status("FAILED")
-                    .createdAt(LocalDateTime.now())
-                    .build();
-
-            llmCallLogRepository.save(failedLog);
+            try {
+                LlmCallLog failedLog = LlmCallLog.builder()
+                        .callingComponent(callingComponent)
+                        .modelName(model)
+                        .prompt(promptJson != null ? promptJson : "{}")
+                        .response(responseBody)
+                        .tokensUsed(null)
+                        .status("FAILED")
+                        .createdAt(LocalDateTime.now())
+                        .build();
+                llmCallLogRepository.save(failedLog);
+            } catch (Exception logEx) {
+                log.error("Failed to save LLM call log: {}", logEx.getMessage());
+            }
 
             throw new RuntimeException("LLM call failed for component: " + callingComponent, e);
         }
@@ -146,10 +158,16 @@ public class LlmGatewayService {
 
     private int extractRetryDelay(JsonNode jsonNode) {
         try {
+            String message = jsonNode.get("error").get("message").asText();
+            if (message.contains("Please retry in")) {
+                String[] parts = message.split("Please retry in ");
+                double seconds = Double.parseDouble(parts[1].split("s")[0].trim());
+                return (int) Math.ceil(seconds);
+            }
             JsonNode details = jsonNode.get("error").get("details");
             if (details != null && details.isArray()) {
                 for (JsonNode detail : details) {
-                    if ("type.googleapis.com/google.rpc.RetryInfo"
+                    if (detail.has("@type") && "type.googleapis.com/google.rpc.RetryInfo"
                             .equals(detail.get("@type").asText())) {
                         String retryDelay = detail.get("retryDelay").asText();
                         return Integer.parseInt(retryDelay.replace("s", "").trim());
@@ -157,7 +175,7 @@ public class LlmGatewayService {
                 }
             }
         } catch (Exception e) {
-            log.warn("Could not extract retryDelay from Gemini response, defaulting to 60s");
+            log.warn("Could not extract retryDelay, defaulting to 60s");
         }
         return 60;
     }
