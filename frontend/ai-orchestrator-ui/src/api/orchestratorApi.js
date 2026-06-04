@@ -15,3 +15,9 @@ export async function getJob(jobId) {
   if (!response.ok) throw new Error('Failed to fetch job');
   return response.json();
 }
+
+export async function getJobTrace(jobId) {
+  const response = await fetch(`${BASE_URL}/api/jobs/${jobId}/trace`);
+  if (!response.ok) throw new Error('Failed to fetch job trace');
+  return response.json();
+}
