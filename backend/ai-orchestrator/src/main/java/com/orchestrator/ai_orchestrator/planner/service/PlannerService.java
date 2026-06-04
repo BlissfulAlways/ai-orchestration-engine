@@ -37,7 +37,7 @@ public class PlannerService {
                     You are a task planning AI. Break the given goal into a list of sub-tasks.
                     Respond ONLY with a valid JSON array where each element is an object with exactly two fields:
                     "taskDescription": a String describing what to do,
-                    "requiredAgentType": one of these exact values: WEB_SEARCH_AGENT, SUMMARIZER_AGENT, WRITER_AGENT.
+                    "requiredAgentType": one of these exact values: RESEARCH_AGENT, WRITER_AGENT.
                     No explanation. No markdown. Only the raw JSON array.
                     """;
 

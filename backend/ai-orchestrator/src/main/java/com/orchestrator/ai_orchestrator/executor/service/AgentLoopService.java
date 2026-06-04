@@ -63,6 +63,12 @@ public class AgentLoopService {
             String toolName = extractMarkerValue(llmResponse, TOOL_NAME_MARKER);
             String toolInput = extractMarkerValue(llmResponse, TOOL_INPUT_MARKER);
 
+            if (toolName.isEmpty()) {
+                log.warn("Agent returned TOOL_CALL but empty tool name, treating as final answer jobId={}", jobId);
+                agentExecutionStepRepository.save(step);
+                return llmResponse;
+            }
+
             String toolResult;
             try {
                 toolResult = toolExecutor.execute(toolName, toolInput, availableTools);
@@ -128,6 +134,7 @@ public class AgentLoopService {
         int markerIndex = response.indexOf(marker);
         if (markerIndex == -1) return "";
         int valueStart = markerIndex + marker.length();
+        while (valueStart < response.length() && response.charAt(valueStart) == '\n') valueStart++;
         int valueEnd = response.indexOf("\n", valueStart);
         if (valueEnd == -1) valueEnd = response.length();
         return response.substring(valueStart, valueEnd).trim();

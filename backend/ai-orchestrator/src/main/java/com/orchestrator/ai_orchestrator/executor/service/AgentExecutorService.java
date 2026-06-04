@@ -43,7 +43,7 @@ public class AgentExecutorService {
 
     @Scheduled(fixedDelay = 5000)
     public void pollAndExecute() {
-        for (String agentType : List.of("WEB_SEARCH_AGENT", "SUMMARIZER_AGENT", "WRITER_AGENT")) {
+        for (String agentType : List.of("RESEARCH_AGENT", "WRITER_AGENT")) {
             Optional<QueuedTask> pickedTask = taskQueueRepository
                     .atomicPickup(agentType, LocalDateTime.now());
 
