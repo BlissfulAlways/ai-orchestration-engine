@@ -1,10 +1,10 @@
 package com.orchestrator.ai_orchestrator.executor.service;
 
+import com.orchestrator.ai_orchestrator.aggregator.service.AggregatorTriggerService;
 import com.orchestrator.ai_orchestrator.executor.domain.AgentExecutionStep;
 import com.orchestrator.ai_orchestrator.executor.domain.ToolDefinition;
 import com.orchestrator.ai_orchestrator.executor.infrastructure.AgentExecutionStepRepository;
 import com.orchestrator.ai_orchestrator.executor.infrastructure.ToolDefinitionRepository;
-import com.orchestrator.ai_orchestrator.aggregator.service.AggregatorTriggerService;
 import com.orchestrator.ai_orchestrator.observer.service.ObserverService;
 import com.orchestrator.ai_orchestrator.planner.domain.PlannedTask;
 import com.orchestrator.ai_orchestrator.planner.infrastructure.PlannedTaskRepository;
@@ -23,6 +23,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -46,9 +47,7 @@ public class AgentExecutorService {
         for (String agentType : List.of("RESEARCH_AGENT", "WRITER_AGENT")) {
             Optional<QueuedTask> pickedTask = taskQueueRepository
                     .atomicPickup(agentType, LocalDateTime.now());
-
             if (pickedTask.isEmpty()) continue;
-
             executeTask(pickedTask.get());
         }
     }
@@ -96,12 +95,16 @@ public class AgentExecutorService {
             List<AgentExecutionStep> previousSteps = agentExecutionStepRepository
                     .findByTaskQueueIdOrderByStepNumberAsc(queuedTask.getId());
 
+            String priorTaskContext = buildPriorTaskContext(
+                    queuedTask.getJobId(), plannedTask.getSequenceNumber());
+
             String finalAnswer = agentLoopService.runLoop(
                     queuedTask.getJobId(),
                     queuedTask.getId(),
                     plannedTask.getTaskDescription(),
                     availableTools,
-                    previousSteps
+                    previousSteps,
+                    priorTaskContext
             );
 
             TaskResult result = TaskResult.builder()
@@ -141,6 +144,37 @@ public class AgentExecutorService {
                 aggregatorTriggerService.checkAndTrigger(queuedTask.getJobId());
             }
         }
+    }
+
+    private String buildPriorTaskContext(java.util.UUID jobId, int currentSequenceNumber) {
+        if (currentSequenceNumber <= 1) return null;
+
+        List<PlannedTask> allTasks = plannedTaskRepository
+                .findByJobIdOrderBySequenceNumberAsc(jobId);
+
+        List<TaskResult> completedResults = taskResultRepository.findByJobId(jobId)
+                .stream()
+                .filter(r -> r.getStatus() == TaskResultStatus.COMPLETED)
+                .filter(r -> r.getResultContent() != null)
+                .collect(Collectors.toList());
+
+        if (completedResults.isEmpty()) return null;
+
+        Map<java.util.UUID, PlannedTask> taskById = allTasks.stream()
+                .collect(Collectors.toMap(PlannedTask::getId, t -> t));
+
+        StringBuilder context = new StringBuilder();
+        for (TaskResult result : completedResults) {
+            PlannedTask task = taskById.get(result.getPlannedTaskId());
+            if (task != null && task.getSequenceNumber() < currentSequenceNumber) {
+                context.append("Task ").append(task.getSequenceNumber())
+                       .append(" (").append(task.getRequiredAgentType()).append("): ")
+                       .append(task.getTaskDescription()).append("\n");
+                context.append("Result: ").append(result.getResultContent()).append("\n\n");
+            }
+        }
+
+        return context.length() > 0 ? context.toString() : null;
     }
 
     private void markTaskFailed(QueuedTask queuedTask, String reason) {
