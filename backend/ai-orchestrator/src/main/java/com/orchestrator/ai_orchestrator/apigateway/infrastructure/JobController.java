@@ -35,6 +35,7 @@ public class JobController {
             String status,
             String goal,
             String finalAnswer,
+            String failureReason,
             LocalDateTime createdAt,
             LocalDateTime updatedAt
     ) {}
@@ -52,13 +53,11 @@ public class JobController {
     @GetMapping("/{jobId}")
     public ResponseEntity<JobResponse> getJob(@PathVariable UUID jobId) {
         Optional<Job> jobOpt = jobService.getJob(jobId);
-
         if (jobOpt.isEmpty()) {
             return ResponseEntity.notFound().build();
         }
 
         Job job = jobOpt.get();
-
         String finalAnswerText = null;
         if (job.getStatus() == JobStatus.COMPLETED && job.getFinalAnswerId() != null) {
             finalAnswerText = finalAnswerRepository
@@ -67,15 +66,13 @@ public class JobController {
                     .orElse(null);
         }
 
-        JobResponse response = new JobResponse(
+        return ResponseEntity.ok(new JobResponse(
                 job.getId(),
                 job.getStatus().name(),
                 job.getGoal(),
                 finalAnswerText,
+                job.getFailureReason(),
                 job.getCreatedAt(),
-                job.getUpdatedAt()
-        );
-
-        return ResponseEntity.ok(response);
+                job.getUpdatedAt()));
     }
 }

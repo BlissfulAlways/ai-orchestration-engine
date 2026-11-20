@@ -2,6 +2,7 @@ package com.orchestrator.ai_orchestrator.apigateway.domain;
 
 import jakarta.persistence.*;
 import lombok.*;
+
 import java.time.LocalDateTime;
 import java.util.UUID;
 
@@ -30,6 +31,10 @@ public class Job {
 
     @Column(name = "final_answer_id", nullable = true)
     private UUID finalAnswerId;
+
+    /** Set only when status is FAILED. Explains what went wrong. */
+    @Column(name = "failure_reason", nullable = true, columnDefinition = "TEXT")
+    private String failureReason;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
