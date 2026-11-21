@@ -41,9 +41,9 @@ public class RouterService {
     private final JobRepository jobRepository;
     private final ObserverService observerService;
 
-    // Note: a ROUTING_FAILED event is intentionally not emitted here. This method runs inside a
-    // transaction that rolls back on failure, which would roll back the event too. The failure
-    // is recorded outside the transaction by JobService.failJob (event JOB_FAILED + reason).
+    // Events are written by ObserverService on its own thread and in its own transaction, so
+    // they are NOT rolled back if this method fails. ROUTING_COMPLETED is emitted just before
+    // the commit. If a routing attempt fails, JobService.failJob records JOB_FAILED + the reason.
     @Transactional
     public void route(UUID jobId) {
         observerService.emit("TASK_ROUTER", "ROUTING_STARTED", jobId,

@@ -1,7 +1,7 @@
 package com.orchestrator.ai_orchestrator.apigateway.infrastructure;
 
-import com.orchestrator.ai_orchestrator.aggregator.infrastructure.FinalAnswerRepository;
 import com.orchestrator.ai_orchestrator.apigateway.domain.Job;
+import com.orchestrator.ai_orchestrator.apigateway.service.JobQueryService;
 import com.orchestrator.ai_orchestrator.apigateway.service.JobService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -12,9 +12,9 @@ import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDateTime;
 import java.util.Map;
-import java.util.Optional;
 import java.util.UUID;
 
+/** HTTP layer only: validates input, calls a service, shapes the response. */
 @Slf4j
 @RestController
 @RequestMapping("/api/jobs")
@@ -22,7 +22,7 @@ import java.util.UUID;
 public class JobController {
 
     private final JobService jobService;
-    private final FinalAnswerRepository finalAnswerRepository;
+    private final JobQueryService jobQueryService;
 
     public record SubmitJobRequest(
             @NotBlank(message = "userId cannot be blank") String userId,
@@ -37,7 +37,19 @@ public class JobController {
             String failureReason,
             LocalDateTime createdAt,
             LocalDateTime updatedAt
-    ) {}
+    ) {
+        static JobResponse from(JobQueryService.JobView view) {
+            Job job = view.job();
+            return new JobResponse(
+                    job.getId(),
+                    job.getStatus().name(),
+                    job.getGoal(),
+                    view.finalAnswer(),
+                    job.getFailureReason(),
+                    job.getCreatedAt(),
+                    job.getUpdatedAt());
+        }
+    }
 
     @PostMapping
     public ResponseEntity<Map<String, String>> submitJob(@Valid @RequestBody SubmitJobRequest request) {
@@ -51,30 +63,9 @@ public class JobController {
 
     @GetMapping("/{jobId}")
     public ResponseEntity<JobResponse> getJob(@PathVariable UUID jobId) {
-        Optional<Job> jobOpt = jobService.getJob(jobId);
-        if (jobOpt.isEmpty()) {
-            return ResponseEntity.notFound().build();
-        }
-
-        Job job = jobOpt.get();
-
-        // A final answer exists for COMPLETED and COMPLETED_WITH_ERRORS jobs; it is only ever
-        // linked to the job at the moment the job reaches one of those two states.
-        String finalAnswerText = null;
-        if (job.getFinalAnswerId() != null) {
-            finalAnswerText = finalAnswerRepository
-                    .findById(job.getFinalAnswerId())
-                    .map(fa -> fa.getAnswerContent())
-                    .orElse(null);
-        }
-
-        return ResponseEntity.ok(new JobResponse(
-                job.getId(),
-                job.getStatus().name(),
-                job.getGoal(),
-                finalAnswerText,
-                job.getFailureReason(),
-                job.getCreatedAt(),
-                job.getUpdatedAt()));
+        return jobQueryService.findJob(jobId)
+                .map(JobResponse::from)
+                .map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.notFound().build());
     }
 }

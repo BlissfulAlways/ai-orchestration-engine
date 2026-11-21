@@ -14,7 +14,6 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -71,10 +70,6 @@ public class JobService {
         // The caller gets its jobId immediately; planning and routing continue in the background.
         startPipeline(savedJob.getId());
         return savedJob.getId();
-    }
-
-    public Optional<Job> getJob(UUID jobId) {
-        return jobRepository.findById(jobId);
     }
 
     /** Starts (or restarts) the pipeline for a job that was interrupted. Safe to call twice. */
