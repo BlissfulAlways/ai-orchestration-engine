@@ -2,7 +2,6 @@ package com.orchestrator.ai_orchestrator.apigateway.infrastructure;
 
 import com.orchestrator.ai_orchestrator.aggregator.infrastructure.FinalAnswerRepository;
 import com.orchestrator.ai_orchestrator.apigateway.domain.Job;
-import com.orchestrator.ai_orchestrator.apigateway.domain.JobStatus;
 import com.orchestrator.ai_orchestrator.apigateway.service.JobService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -58,8 +57,11 @@ public class JobController {
         }
 
         Job job = jobOpt.get();
+
+        // A final answer exists for COMPLETED and COMPLETED_WITH_ERRORS jobs; it is only ever
+        // linked to the job at the moment the job reaches one of those two states.
         String finalAnswerText = null;
-        if (job.getStatus() == JobStatus.COMPLETED && job.getFinalAnswerId() != null) {
+        if (job.getFinalAnswerId() != null) {
             finalAnswerText = finalAnswerRepository
                     .findById(job.getFinalAnswerId())
                     .map(fa -> fa.getAnswerContent())

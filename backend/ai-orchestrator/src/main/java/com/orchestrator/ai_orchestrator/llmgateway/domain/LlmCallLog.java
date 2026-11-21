@@ -4,6 +4,7 @@ import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
+
 import java.time.LocalDateTime;
 import java.util.UUID;
 
@@ -19,6 +20,10 @@ public class LlmCallLog {
     @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "id", nullable = false)
     private UUID id;
+
+    /** The job this call belongs to. Null only for calls made outside a job. */
+    @Column(name = "job_id", nullable = true)
+    private UUID jobId;
 
     @Column(name = "calling_component", nullable = false)
     private String callingComponent;
@@ -36,6 +41,10 @@ public class LlmCallLog {
 
     @Column(name = "tokens_used", nullable = true)
     private Integer tokensUsed;
+
+    /** Total time for the logical call, including retries and waits. */
+    @Column(name = "latency_ms", nullable = true)
+    private Integer latencyMs;
 
     @Column(name = "status", nullable = false)
     private String status;

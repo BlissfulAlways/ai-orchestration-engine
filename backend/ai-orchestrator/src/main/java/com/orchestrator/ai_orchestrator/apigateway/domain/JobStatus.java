@@ -7,5 +7,6 @@ public enum JobStatus {
     EXECUTING,
     AGGREGATING,
     COMPLETED,
+    COMPLETED_WITH_ERRORS,
     FAILED
 }

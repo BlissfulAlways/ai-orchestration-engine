@@ -1,11 +1,13 @@
 package com.orchestrator.ai_orchestrator.executor.service;
 
 import com.orchestrator.ai_orchestrator.aggregator.service.AggregatorTriggerService;
+import com.orchestrator.ai_orchestrator.common.AgentTypes;
 import com.orchestrator.ai_orchestrator.common.ErrorMessages;
 import com.orchestrator.ai_orchestrator.executor.domain.AgentExecutionStep;
 import com.orchestrator.ai_orchestrator.executor.domain.ToolDefinition;
 import com.orchestrator.ai_orchestrator.executor.infrastructure.AgentExecutionStepRepository;
 import com.orchestrator.ai_orchestrator.executor.infrastructure.ToolDefinitionRepository;
+import com.orchestrator.ai_orchestrator.llmgateway.service.LlmException;
 import com.orchestrator.ai_orchestrator.observer.service.ObserverService;
 import com.orchestrator.ai_orchestrator.planner.domain.PlannedTask;
 import com.orchestrator.ai_orchestrator.planner.infrastructure.PlannedTaskRepository;
@@ -13,34 +15,47 @@ import com.orchestrator.ai_orchestrator.resultstore.domain.TaskResult;
 import com.orchestrator.ai_orchestrator.resultstore.domain.TaskResultStatus;
 import com.orchestrator.ai_orchestrator.resultstore.infrastructure.TaskResultRepository;
 import com.orchestrator.ai_orchestrator.taskqueue.domain.QueuedTask;
-import com.orchestrator.ai_orchestrator.taskqueue.domain.QueuedTaskStatus;
 import com.orchestrator.ai_orchestrator.taskqueue.infrastructure.TaskQueueRepository;
-import lombok.RequiredArgsConstructor;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
- * Pulls tasks from the queue, runs them through the agent loop, and records the outcome.
+ * Pulls tasks from the queue and runs them on a bounded pool of workers.
  *
- * <p>Known limitation (fixed in Phase 3): polling, execution and the stuck-task rescuer all
- * share Spring's default single scheduler thread, so the rescuer cannot run while a task runs.
+ * <pre>
+ *   pollAndDispatch   every 2 s   claims tasks while a worker slot is free, hands each to a worker
+ *   sendHeartbeats    every 30 s  tells the database "these tasks are still running"
+ *   rescueStuckTasks  every 30 s  re-queues tasks whose heartbeat went silent (worker died)
+ * </pre>
+ *
+ * <p>The poller only DISPATCHES; it never runs a task itself, so the scheduler thread is never
+ * blocked and the three jobs above keep running on time.
+ *
+ * <p>Concurrency is capped by {@code orchestrator.executor.max-workers} (default 3), because
+ * every running task makes model calls and the provider limits how many are allowed at once.
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class AgentExecutorService {
 
     private static final int MAX_RETRY_COUNT = 3;
-    private static final int STUCK_TASK_TIMEOUT_MINUTES = 5;
-    private static final List<String> AGENT_TYPES = List.of("RESEARCH_AGENT", "WRITER_AGENT");
+    private static final long SHUTDOWN_WAIT_SECONDS = 30;
 
     private final TaskQueueRepository taskQueueRepository;
     private final PlannedTaskRepository plannedTaskRepository;
@@ -52,29 +67,114 @@ public class AgentExecutorService {
     private final AggregatorTriggerService aggregatorTriggerService;
     private final TaskOutcomeService taskOutcomeService;
 
-    /** Claims and runs at most one task per agent type on every tick. */
-    @Scheduled(fixedDelay = 5000)
-    public void pollAndExecute() {
-        for (String agentType : AGENT_TYPES) {
-            try {
-                taskQueueRepository
-                        .atomicPickup(agentType, LocalDateTime.now())
-                        .ifPresent(this::executeTask);
-            } catch (Exception e) {
-                // One failing agent type must not stop the others from being polled.
-                log.error("Polling failed for agentType={}", agentType, e);
+    private final int staleTaskSeconds;
+    /** One permit per worker. A permit is taken when a task is claimed and returned when it ends. */
+    private final Semaphore workerSlots;
+    private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
+    /** Queue ids of the tasks running inside this process right now. */
+    private final Set<UUID> runningTaskIds = ConcurrentHashMap.newKeySet();
+    private volatile boolean acceptingWork = true;
+
+    public AgentExecutorService(TaskQueueRepository taskQueueRepository,
+                                PlannedTaskRepository plannedTaskRepository,
+                                ToolDefinitionRepository toolDefinitionRepository,
+                                AgentExecutionStepRepository agentExecutionStepRepository,
+                                TaskResultRepository taskResultRepository,
+                                AgentLoopService agentLoopService,
+                                ObserverService observerService,
+                                AggregatorTriggerService aggregatorTriggerService,
+                                TaskOutcomeService taskOutcomeService,
+                                @Value("${orchestrator.executor.max-workers:3}") int maxWorkers,
+                                @Value("${orchestrator.executor.stale-task-seconds:120}") int staleTaskSeconds) {
+        this.taskQueueRepository = taskQueueRepository;
+        this.plannedTaskRepository = plannedTaskRepository;
+        this.toolDefinitionRepository = toolDefinitionRepository;
+        this.agentExecutionStepRepository = agentExecutionStepRepository;
+        this.taskResultRepository = taskResultRepository;
+        this.agentLoopService = agentLoopService;
+        this.observerService = observerService;
+        this.aggregatorTriggerService = aggregatorTriggerService;
+        this.taskOutcomeService = taskOutcomeService;
+        this.staleTaskSeconds = staleTaskSeconds;
+        this.workerSlots = new Semaphore(Math.max(1, maxWorkers));
+    }
+
+    // ---------------------------------------------------------------- dispatching
+
+    @Scheduled(fixedDelayString = "${orchestrator.executor.poll-interval-ms:2000}")
+    public void pollAndDispatch() {
+        boolean claimedAny;
+        do {
+            claimedAny = false;
+            for (String agentType : AgentTypes.ALL) {
+                // No free worker (or shutting down): stop. Waiting tasks stay PENDING in the database.
+                if (!acceptingWork || !workerSlots.tryAcquire()) {
+                    return;
+                }
+                QueuedTask task = claimNext(agentType);
+                if (task == null) {
+                    workerSlots.release(); // Nothing to run, give the slot back.
+                    continue;
+                }
+                dispatch(task);
+                claimedAny = true;
             }
+        } while (claimedAny); // Keep going until the workers are full or the queue is empty.
+    }
+
+    private QueuedTask claimNext(String agentType) {
+        try {
+            return taskQueueRepository.atomicPickup(agentType, LocalDateTime.now()).orElse(null);
+        } catch (Exception e) {
+            // One failing agent type must not stop the others from being polled.
+            log.error("Polling failed for agentType={}", agentType, e);
+            return null;
+        }
+    }
+
+    private void dispatch(QueuedTask task) {
+        runningTaskIds.add(task.getId());
+        try {
+            workers.execute(() -> {
+                try {
+                    executeTask(task);
+                } finally {
+                    runningTaskIds.remove(task.getId());
+                    workerSlots.release();
+                }
+            });
+        } catch (RuntimeException e) {
+            // The worker could not start (for example during shutdown). The row stays
+            // PROCESSING; its heartbeat will go quiet and the rescuer will re-queue it.
+            runningTaskIds.remove(task.getId());
+            workerSlots.release();
+            log.error("Could not start worker for taskQueueId={}", task.getId(), e);
+        }
+    }
+
+    // ---------------------------------------------------------------- heartbeat and rescue
+
+    @Scheduled(fixedDelayString = "${orchestrator.executor.heartbeat-interval-ms:30000}")
+    public void sendHeartbeats() {
+        if (runningTaskIds.isEmpty()) {
+            return;
+        }
+        try {
+            taskQueueRepository.touchHeartbeat(List.copyOf(runningTaskIds), LocalDateTime.now());
+        } catch (Exception e) {
+            log.error("Could not send heartbeats", e);
         }
     }
 
     /** Re-queues tasks whose worker disappeared, or fails them after too many attempts. */
-    @Scheduled(fixedDelay = 60000)
+    @Scheduled(fixedDelayString = "${orchestrator.executor.rescue-interval-ms:30000}")
     public void rescueStuckTasks() {
-        LocalDateTime cutoff = LocalDateTime.now().minusMinutes(STUCK_TASK_TIMEOUT_MINUTES);
-        List<QueuedTask> stuckTasks = taskQueueRepository
-                .findByStatusAndPickedUpAtBefore(QueuedTaskStatus.PROCESSING, cutoff);
+        LocalDateTime cutoff = LocalDateTime.now().minusSeconds(staleTaskSeconds);
 
-        for (QueuedTask stuckTask : stuckTasks) {
+        for (QueuedTask stuckTask : taskQueueRepository.findStaleProcessingTasks(cutoff)) {
+            if (runningTaskIds.contains(stuckTask.getId())) {
+                continue; // Alive in this process; only the heartbeat write was late.
+            }
             try {
                 if (stuckTask.getRetryCount() < MAX_RETRY_COUNT) {
                     taskOutcomeService.scheduleRetry(stuckTask);
@@ -92,6 +192,8 @@ public class AgentExecutorService {
             }
         }
     }
+
+    // ---------------------------------------------------------------- running one task
 
     private void executeTask(QueuedTask queuedTask) {
         boolean taskSettled;
@@ -148,8 +250,7 @@ public class AgentExecutorService {
      *         or if the bookkeeping itself failed
      */
     private boolean handleFailure(QueuedTask queuedTask, Exception error) {
-        boolean canRetry = !(error instanceof PermanentTaskFailure)
-                && queuedTask.getRetryCount() < MAX_RETRY_COUNT;
+        boolean canRetry = !isPermanent(error) && queuedTask.getRetryCount() < MAX_RETRY_COUNT;
         try {
             if (canRetry) {
                 taskOutcomeService.scheduleRetry(queuedTask);
@@ -162,11 +263,30 @@ public class AgentExecutorService {
             emitTaskFailed(queuedTask, reason);
             return true;
         } catch (Exception bookkeepingError) {
-            // The database itself is failing. The row stays PROCESSING and the stuck-task
-            // rescuer will pick it up after the timeout.
+            // The database itself is failing. The row stays PROCESSING; the heartbeat stops and
+            // the rescuer picks it up after the timeout.
             log.error("Could not record failure for taskQueueId={}", queuedTask.getId(), bookkeepingError);
             return false;
         }
+    }
+
+    /**
+     * True when retrying cannot help: a missing planned task, or a model error marked
+     * non-retryable (bad API key, blocked prompt). Looks through wrapped exceptions too.
+     */
+    private boolean isPermanent(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof PermanentTaskFailure) {
+                return true;
+            }
+            if (current instanceof LlmException llmError && !llmError.isRetryable()) {
+                return true;
+            }
+            if (current.getCause() == current) {
+                break; // Guard against a cause that points at itself.
+            }
+        }
+        return false;
     }
 
     private void triggerAggregation(UUID jobId) {
@@ -210,6 +330,27 @@ public class AgentExecutorService {
             }
         }
         return context.length() > 0 ? context.toString() : null;
+    }
+
+    // ---------------------------------------------------------------- shutdown
+
+    /**
+     * Stops taking new work and gives running tasks up to 30 s to finish. Anything still
+     * running is left as PROCESSING; its heartbeat stops, and after a restart the rescuer
+     * puts it back in the queue.
+     */
+    @PreDestroy
+    public void shutdown() {
+        acceptingWork = false;
+        workers.shutdown();
+        try {
+            if (!workers.awaitTermination(SHUTDOWN_WAIT_SECONDS, TimeUnit.SECONDS)) {
+                log.warn("{} task(s) still running at shutdown; they will be re-queued after restart",
+                        runningTaskIds.size());
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /** A failure that retrying cannot fix. Skips the retry budget and fails the task at once. */

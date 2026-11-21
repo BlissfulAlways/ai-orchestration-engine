@@ -12,11 +12,11 @@ import java.time.LocalDateTime;
 import java.util.UUID;
 
 /**
- * Saves the final answer and marks the job COMPLETED as ONE transaction.
+ * Saves the final answer and moves the job to its final status as ONE transaction.
  *
  * <p>Either both happen or neither does. If the job is no longer AGGREGATING, the status update
  * changes zero rows, we throw, and the transaction rolls back the answer we just inserted. So
- * there is never an orphan answer, and never a COMPLETED job without an answer.
+ * there is never an orphan answer, and never a finished job without an answer.
  */
 @Service
 @RequiredArgsConstructor
@@ -25,8 +25,12 @@ public class FinalAnswerCommitService {
     private final FinalAnswerRepository finalAnswerRepository;
     private final JobRepository jobRepository;
 
+    /**
+     * @param finalStatus COMPLETED, or COMPLETED_WITH_ERRORS when some tasks failed
+     * @param note        what failed (stored as the job's failure_reason), or null if nothing did
+     */
     @Transactional
-    public UUID commit(UUID jobId, String answerText) {
+    public UUID commit(UUID jobId, String answerText, JobStatus finalStatus, String note) {
         LocalDateTime now = LocalDateTime.now();
 
         // saveAndFlush sends the INSERT immediately, so the foreign key from
@@ -38,7 +42,7 @@ public class FinalAnswerCommitService {
                 .build());
 
         int updated = jobRepository.completeJob(
-                jobId, saved.getId(), JobStatus.AGGREGATING, JobStatus.COMPLETED, now);
+                jobId, saved.getId(), JobStatus.AGGREGATING, finalStatus, note, now);
         if (updated != 1) {
             throw new IllegalStateException(
                     "Job " + jobId + " was not in AGGREGATING state; discarding final answer");

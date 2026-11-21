@@ -39,4 +39,8 @@ public class QueuedTask {
 
     @Column(name = "picked_up_at", nullable = true)
     private LocalDateTime pickedUpAt;
+
+    /** Updated every few seconds while a worker runs the task. Silence means the worker died. */
+    @Column(name = "heartbeat_at", nullable = true)
+    private LocalDateTime heartbeatAt;
 }

@@ -3,12 +3,14 @@ package com.orchestrator.ai_orchestrator.taskqueue.infrastructure;
 import com.orchestrator.ai_orchestrator.taskqueue.domain.QueuedTask;
 import com.orchestrator.ai_orchestrator.taskqueue.domain.QueuedTaskStatus;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -23,21 +25,19 @@ public interface TaskQueueRepository extends JpaRepository<QueuedTask, UUID> {
      * <ol>
      *   <li>it is PENDING and belongs to the requested agent type, and</li>
      *   <li>every task with a LOWER sequence number in the same job already has a settled
-     *       result (COMPLETED or FAILED). This preserves the plan's order, because each task
-     *       is given the results of the earlier ones as context.</li>
+     *       result (COMPLETED or FAILED), which preserves the plan's order.</li>
      * </ol>
      *
      * <p>{@code FOR UPDATE OF q SKIP LOCKED} locks only the queue row and makes concurrent
-     * workers skip rows another worker holds instead of waiting. "OF q" matters: without it
-     * the join would lock planned_tasks rows as well.
+     * workers skip rows another worker holds instead of waiting.
      *
-     * <p>Limitation: tasks of one job now run strictly one after another, even if they are
-     * independent. Parallel execution needs explicit task dependencies (planned for Phase 6).
+     * <p>The claim also sets heartbeat_at, so a freshly claimed task is never mistaken for a
+     * stuck one.
      */
     @Transactional
     @Query(value = """
             UPDATE task_queue
-               SET status = 'PROCESSING', picked_up_at = :pickedUpAt
+               SET status = 'PROCESSING', picked_up_at = :pickedUpAt, heartbeat_at = :pickedUpAt
              WHERE id = (
                  SELECT q.id
                    FROM task_queue q
@@ -72,8 +72,24 @@ public interface TaskQueueRepository extends JpaRepository<QueuedTask, UUID> {
     List<QueuedTask> findByStatus(QueuedTaskStatus status);
 
     /**
-     * Tasks in the given status that were picked up before {@code cutoff}.
-     * The database does the filtering; the application never loads the whole table.
+     * Tasks marked PROCESSING whose last sign of life (heartbeat, or pickup time if there
+     * never was a heartbeat) is older than {@code cutoff}. Their worker is presumed dead.
      */
-    List<QueuedTask> findByStatusAndPickedUpAtBefore(QueuedTaskStatus status, LocalDateTime cutoff);
+    @Query("""
+            SELECT t FROM QueuedTask t
+             WHERE t.status = com.orchestrator.ai_orchestrator.taskqueue.domain.QueuedTaskStatus.PROCESSING
+               AND COALESCE(t.heartbeatAt, t.pickedUpAt) < :cutoff
+            """)
+    List<QueuedTask> findStaleProcessingTasks(@Param("cutoff") LocalDateTime cutoff);
+
+    /** Records "still alive" for every listed task that is still PROCESSING; returns rows changed. */
+    @Modifying
+    @Transactional
+    @Query("""
+            UPDATE QueuedTask t
+               SET t.heartbeatAt = :now
+             WHERE t.id IN :ids
+               AND t.status = com.orchestrator.ai_orchestrator.taskqueue.domain.QueuedTaskStatus.PROCESSING
+            """)
+    int touchHeartbeat(@Param("ids") Collection<UUID> ids, @Param("now") LocalDateTime now);
 }
