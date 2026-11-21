@@ -10,7 +10,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -58,7 +58,7 @@ public class JobRecoveryService {
 
     @Scheduled(fixedDelayString = "${orchestrator.recovery.interval-ms:60000}")
     public void recoverStalledJobs() {
-        LocalDateTime cutoff = LocalDateTime.now().minusMinutes(staleMinutes);
+        Instant cutoff = Instant.now().minusSeconds(staleMinutes * 60L);
         for (Job job : jobRepository.findByStatusInAndUpdatedAtBefore(RECOVERABLE_STATUSES, cutoff)) {
             try {
                 recover(job);
@@ -81,7 +81,7 @@ public class JobRecoveryService {
         }
 
         // Claim the job. If another recoverer got here first, this returns 0 and we skip.
-        if (jobRepository.claimForRecovery(jobId, status, job.getUpdatedAt(), LocalDateTime.now()) == 0) {
+        if (jobRepository.claimForRecovery(jobId, status, job.getUpdatedAt(), Instant.now()) == 0) {
             return;
         }
 
@@ -94,7 +94,7 @@ public class JobRecoveryService {
             case EXECUTING -> aggregatorTriggerService.checkAndTrigger(jobId);
             case AGGREGATING -> {
                 int reset = jobRepository.transitionStatus(
-                        jobId, JobStatus.AGGREGATING, JobStatus.EXECUTING, LocalDateTime.now());
+                        jobId, JobStatus.AGGREGATING, JobStatus.EXECUTING, Instant.now());
                 if (reset == 1) {
                     aggregatorTriggerService.checkAndTrigger(jobId);
                 }

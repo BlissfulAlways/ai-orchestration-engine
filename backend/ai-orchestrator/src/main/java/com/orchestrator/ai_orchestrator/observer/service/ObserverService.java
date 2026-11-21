@@ -8,7 +8,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -72,7 +72,7 @@ public class ObserverService {
                     .eventType(eventType)
                     .jobId(jobId)
                     .payload(objectMapper.writeValueAsString(payload))
-                    .createdAt(LocalDateTime.now())
+                    .createdAt(Instant.now())
                     .build();
         } catch (Exception e) {
             log.error("Observer could not build event source={} type={} jobId={}",

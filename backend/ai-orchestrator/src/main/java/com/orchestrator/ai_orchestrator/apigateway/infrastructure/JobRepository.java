@@ -9,7 +9,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
@@ -37,7 +37,7 @@ public interface JobRepository extends JpaRepository<Job, UUID> {
     int transitionStatus(@Param("jobId") UUID jobId,
                          @Param("expectedStatus") JobStatus expectedStatus,
                          @Param("newStatus") JobStatus newStatus,
-                         @Param("now") LocalDateTime now);
+                         @Param("now") Instant now);
 
     /**
      * Finishes a job: links its final answer and sets the final status (COMPLETED, or
@@ -60,7 +60,7 @@ public interface JobRepository extends JpaRepository<Job, UUID> {
                     @Param("expectedStatus") JobStatus expectedStatus,
                     @Param("newStatus") JobStatus newStatus,
                     @Param("note") String note,
-                    @Param("now") LocalDateTime now);
+                    @Param("now") Instant now);
 
     /**
      * Marks a job FAILED with a reason, unless it already reached a final state.
@@ -81,10 +81,10 @@ public interface JobRepository extends JpaRepository<Job, UUID> {
             """)
     int markFailed(@Param("jobId") UUID jobId,
                    @Param("reason") String reason,
-                   @Param("now") LocalDateTime now);
+                   @Param("now") Instant now);
 
     /** Jobs in any of the given statuses that have made no progress since {@code cutoff}. */
-    List<Job> findByStatusInAndUpdatedAtBefore(Collection<JobStatus> statuses, LocalDateTime cutoff);
+    List<Job> findByStatusInAndUpdatedAtBefore(Collection<JobStatus> statuses, Instant cutoff);
 
     /**
      * Claims a stalled job for recovery by pushing its updated_at forward. Only succeeds if
@@ -102,6 +102,6 @@ public interface JobRepository extends JpaRepository<Job, UUID> {
             """)
     int claimForRecovery(@Param("jobId") UUID jobId,
                          @Param("status") JobStatus status,
-                         @Param("previousUpdatedAt") LocalDateTime previousUpdatedAt,
-                         @Param("now") LocalDateTime now);
+                         @Param("previousUpdatedAt") Instant previousUpdatedAt,
+                         @Param("now") Instant now);
 }

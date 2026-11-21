@@ -11,7 +11,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 
 /**
  * Records what happened to a task. Each public method is ONE database transaction:
@@ -70,7 +70,7 @@ public class TaskOutcomeService {
                     queuedTask.getPlannedTaskId());
             return;
         }
-        LocalDateTime now = LocalDateTime.now();
+        Instant now = Instant.now();
         taskResultRepository.save(TaskResult.builder()
                 .jobId(queuedTask.getJobId())
                 .plannedTaskId(queuedTask.getPlannedTaskId())

@@ -9,7 +9,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -64,7 +64,7 @@ public interface TaskQueueRepository extends JpaRepository<QueuedTask, UUID> {
             """, nativeQuery = true)
     Optional<QueuedTask> atomicPickup(
             @Param("agentType") String agentType,
-            @Param("pickedUpAt") LocalDateTime pickedUpAt
+            @Param("pickedUpAt") Instant pickedUpAt
     );
 
     List<QueuedTask> findByJobId(UUID jobId);
@@ -80,7 +80,7 @@ public interface TaskQueueRepository extends JpaRepository<QueuedTask, UUID> {
              WHERE t.status = com.orchestrator.ai_orchestrator.taskqueue.domain.QueuedTaskStatus.PROCESSING
                AND COALESCE(t.heartbeatAt, t.pickedUpAt) < :cutoff
             """)
-    List<QueuedTask> findStaleProcessingTasks(@Param("cutoff") LocalDateTime cutoff);
+    List<QueuedTask> findStaleProcessingTasks(@Param("cutoff") Instant cutoff);
 
     /** Records "still alive" for every listed task that is still PROCESSING; returns rows changed. */
     @Modifying
@@ -91,5 +91,5 @@ public interface TaskQueueRepository extends JpaRepository<QueuedTask, UUID> {
              WHERE t.id IN :ids
                AND t.status = com.orchestrator.ai_orchestrator.taskqueue.domain.QueuedTaskStatus.PROCESSING
             """)
-    int touchHeartbeat(@Param("ids") Collection<UUID> ids, @Param("now") LocalDateTime now);
+    int touchHeartbeat(@Param("ids") Collection<UUID> ids, @Param("now") Instant now);
 }

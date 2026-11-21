@@ -12,7 +12,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -53,7 +53,7 @@ public class JobService {
             throw new IllegalArgumentException("Goal cannot be empty");
         }
 
-        LocalDateTime now = LocalDateTime.now();
+        Instant now = Instant.now();
         Job savedJob = jobRepository.save(Job.builder()
                 .userId(userId)
                 .goal(goal.trim())
@@ -132,7 +132,7 @@ public class JobService {
 
     /** Changes status only if the job is currently in {@code from}; otherwise throws. */
     private void advance(UUID jobId, JobStatus from, JobStatus to) {
-        int updated = jobRepository.transitionStatus(jobId, from, to, LocalDateTime.now());
+        int updated = jobRepository.transitionStatus(jobId, from, to, Instant.now());
         if (updated == 0) {
             throw new IllegalStateException(
                     "Job " + jobId + " was expected in " + from + " but was not; refusing to move to " + to);
@@ -142,7 +142,7 @@ public class JobService {
     private void failJob(UUID jobId, Exception error) {
         String reason = ErrorMessages.describe(error);
         try {
-            jobRepository.markFailed(jobId, reason, LocalDateTime.now());
+            jobRepository.markFailed(jobId, reason, Instant.now());
             observerService.emit("API_GATEWAY", "JOB_FAILED", jobId,
                     Map.of("jobId", jobId.toString(), "error", reason));
         } catch (Exception secondary) {

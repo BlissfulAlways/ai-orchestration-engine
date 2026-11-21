@@ -8,7 +8,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.UUID;
 
 /**
@@ -31,7 +31,7 @@ public class FinalAnswerCommitService {
      */
     @Transactional
     public UUID commit(UUID jobId, String answerText, JobStatus finalStatus, String note) {
-        LocalDateTime now = LocalDateTime.now();
+        Instant now = Instant.now();
 
         // saveAndFlush sends the INSERT immediately, so the foreign key from
         // jobs.final_answer_id finds the row when the UPDATE below runs.

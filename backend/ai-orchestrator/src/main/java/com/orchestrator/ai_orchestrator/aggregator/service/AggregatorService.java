@@ -16,7 +16,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -66,7 +66,7 @@ public class AggregatorService {
         // Step 1: claim the job. The status check happens inside the UPDATE statement, so
         // exactly one caller gets 1 back.
         int claimed = jobRepository.transitionStatus(
-                jobId, JobStatus.EXECUTING, JobStatus.AGGREGATING, LocalDateTime.now());
+                jobId, JobStatus.EXECUTING, JobStatus.AGGREGATING, Instant.now());
         if (claimed == 0) {
             log.info("Aggregation skipped jobId={}: not in EXECUTING (already claimed or finished)", jobId);
             return;
@@ -143,7 +143,7 @@ public class AggregatorService {
     private void failJob(UUID jobId, Exception error) {
         String reason = ErrorMessages.describe(error);
         try {
-            jobRepository.markFailed(jobId, reason, LocalDateTime.now());
+            jobRepository.markFailed(jobId, reason, Instant.now());
             observerService.emit("RESULT_AGGREGATOR", "AGGREGATION_FAILED", jobId,
                     Map.of("jobId", jobId.toString(), "error", reason));
         } catch (Exception secondary) {

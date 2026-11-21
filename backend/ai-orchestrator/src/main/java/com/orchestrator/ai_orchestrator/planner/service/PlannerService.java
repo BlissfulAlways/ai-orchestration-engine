@@ -18,7 +18,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -134,7 +134,7 @@ public class PlannerService {
 
     /** All tasks are saved together: either every task exists afterwards, or none do. */
     private List<PlannedTask> save(UUID jobId, List<PlanDraft> drafts) {
-        LocalDateTime now = LocalDateTime.now();
+        Instant now = Instant.now();
         List<PlannedTask> tasks = new ArrayList<>();
         int sequenceNumber = 1;
         for (PlanDraft draft : drafts) {

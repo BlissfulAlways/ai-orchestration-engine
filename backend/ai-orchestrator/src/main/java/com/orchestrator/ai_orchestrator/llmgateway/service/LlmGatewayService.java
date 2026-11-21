@@ -18,7 +18,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -357,7 +357,7 @@ public class LlmGatewayService {
                     .tokensUsed(tokens)
                     .latencyMs((int) Math.min(latencyMillis, Integer.MAX_VALUE))
                     .status(status)
-                    .createdAt(LocalDateTime.now())
+                    .createdAt(Instant.now())
                     .build());
         } catch (Exception e) {
             log.error("Failed to save LLM call log jobId={}", request.jobId(), e);

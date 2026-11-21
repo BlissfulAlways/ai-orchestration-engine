@@ -14,7 +14,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -67,7 +67,7 @@ public class RouterService {
                     "No active agent registered for task type(s): " + unroutableTypes);
         }
 
-        LocalDateTime now = LocalDateTime.now();
+        Instant now = Instant.now();
         for (PlannedTask task : plannedTasks) {
             taskQueueRepository.save(QueuedTask.builder()
                     .jobId(jobId)

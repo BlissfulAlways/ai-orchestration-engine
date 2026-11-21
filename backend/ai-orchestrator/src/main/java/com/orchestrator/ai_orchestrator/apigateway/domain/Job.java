@@ -1,22 +1,27 @@
 package com.orchestrator.ai_orchestrator.apigateway.domain;
 
+import com.orchestrator.ai_orchestrator.common.EntityIdentity;
+import com.orchestrator.ai_orchestrator.common.Identifiable;
 import jakarta.persistence.*;
 import lombok.*;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.UUID;
 
-@Data
+@Getter
+@Setter
+@ToString(onlyExplicitlyIncluded = true)
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
 @Entity
 @Table(name = "jobs")
-public class Job {
+public class Job implements Identifiable {
 
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "id", nullable = false)
+    @ToString.Include
     private UUID id;
 
     @Column(name = "user_id", nullable = false)
@@ -27,18 +32,29 @@ public class Job {
 
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false)
+    @ToString.Include
     private JobStatus status;
 
     @Column(name = "final_answer_id", nullable = true)
     private UUID finalAnswerId;
 
-    /** Set only when status is FAILED. Explains what went wrong. */
+    /** Set only when the job failed, or finished with some failed tasks. Explains what went wrong. */
     @Column(name = "failure_reason", nullable = true, columnDefinition = "TEXT")
     private String failureReason;
 
     @Column(name = "created_at", nullable = false, updatable = false)
-    private LocalDateTime createdAt;
+    private Instant createdAt;
 
     @Column(name = "updated_at", nullable = false)
-    private LocalDateTime updatedAt;
+    private Instant updatedAt;
+
+    @Override
+    public boolean equals(Object other) {
+        return EntityIdentity.sameEntity(this, other);
+    }
+
+    @Override
+    public int hashCode() {
+        return EntityIdentity.hashOf(this);
+    }
 }

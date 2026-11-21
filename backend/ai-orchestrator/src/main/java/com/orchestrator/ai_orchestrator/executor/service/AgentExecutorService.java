@@ -22,7 +22,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -124,7 +124,7 @@ public class AgentExecutorService {
 
     private QueuedTask claimNext(String agentType) {
         try {
-            return taskQueueRepository.atomicPickup(agentType, LocalDateTime.now()).orElse(null);
+            return taskQueueRepository.atomicPickup(agentType, Instant.now()).orElse(null);
         } catch (Exception e) {
             // One failing agent type must not stop the others from being polled.
             log.error("Polling failed for agentType={}", agentType, e);
@@ -160,7 +160,7 @@ public class AgentExecutorService {
             return;
         }
         try {
-            taskQueueRepository.touchHeartbeat(List.copyOf(runningTaskIds), LocalDateTime.now());
+            taskQueueRepository.touchHeartbeat(List.copyOf(runningTaskIds), Instant.now());
         } catch (Exception e) {
             log.error("Could not send heartbeats", e);
         }
@@ -169,7 +169,7 @@ public class AgentExecutorService {
     /** Re-queues tasks whose worker disappeared, or fails them after too many attempts. */
     @Scheduled(fixedDelayString = "${orchestrator.executor.rescue-interval-ms:30000}")
     public void rescueStuckTasks() {
-        LocalDateTime cutoff = LocalDateTime.now().minusSeconds(staleTaskSeconds);
+        Instant cutoff = Instant.now().minusSeconds(staleTaskSeconds);
 
         for (QueuedTask stuckTask : taskQueueRepository.findStaleProcessingTasks(cutoff)) {
             if (runningTaskIds.contains(stuckTask.getId())) {
