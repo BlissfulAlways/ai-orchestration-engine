@@ -24,8 +24,10 @@ public interface TaskQueueRepository extends JpaRepository<QueuedTask, UUID> {
      * <p>A task is runnable when:
      * <ol>
      *   <li>it is PENDING and belongs to the requested agent type, and</li>
-     *   <li>every task with a LOWER sequence number in the same job already has a settled
-     *       result (COMPLETED or FAILED), which preserves the plan's order.</li>
+     *   <li>every task it depends on (planned_tasks.depends_on, a list of sequence numbers in
+     *       the same job) already has a settled result (COMPLETED or FAILED). A task with an
+     *       empty list is runnable at once, so a job's independent tasks can be claimed by
+     *       different workers at the same time.</li>
      * </ol>
      *
      * <p>{@code FOR UPDATE OF q SKIP LOCKED} locks only the queue row and makes concurrent
@@ -46,13 +48,13 @@ public interface TaskQueueRepository extends JpaRepository<QueuedTask, UUID> {
                     AND q.required_agent_type = :agentType
                     AND NOT EXISTS (
                         SELECT 1
-                          FROM planned_tasks earlier
-                         WHERE earlier.job_id = p.job_id
-                           AND earlier.sequence_number < p.sequence_number
+                          FROM planned_tasks dependency
+                         WHERE dependency.job_id = p.job_id
+                           AND dependency.sequence_number = ANY (p.depends_on)
                            AND NOT EXISTS (
                                SELECT 1
                                  FROM task_results r
-                                WHERE r.planned_task_id = earlier.id
+                                WHERE r.planned_task_id = dependency.id
                                   AND r.status IN ('COMPLETED', 'FAILED')
                            )
                     )

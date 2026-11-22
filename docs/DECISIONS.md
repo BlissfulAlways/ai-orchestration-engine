@@ -140,13 +140,21 @@ tests.
 
 ---
 
-## 010. Tasks of a job run sequentially (current limitation)
+## 010. Tasks declare dependencies; independent tasks run in parallel
 
-**Context.** The first version of the planner produces an ordered list, and each task
-receives the results of the earlier ones.
+**Context.** The first version ran a job's tasks strictly one after another, so two
+independent research tasks waited for each other and every task received all earlier results.
 
-**Decision.** Strict order, enforced in the claim query.
+**Decision.** The planner states, per task, `dependsOn`: the numbers of earlier tasks it needs.
+The claim query releases a task only when those tasks are settled. A task receives only its
+dependencies' results. If a dependency failed, the task fails at once with `DEPENDENCY_FAILED`
+and the model is not called.
 
-**Consequences.** Simple and predictable, but independent tasks wait for each other. The next
-change adds declared dependencies so that independent tasks run in parallel; the claim query
-and the planner schema are the two places that change.
+**Alternatives.** Keep a strict chain; let the model emit an arbitrary graph and detect cycles.
+
+**Consequences.** A job's duration follows its longest dependency path, not its task count,
+and no quota is spent on work that cannot succeed. A task may depend only on EARLIER tasks, so
+cycles cannot exist and no cycle detection is needed; the planner validates the rule and asks
+the model for one correction. The model decides what is independent, so a wrong judgement
+(treating dependent tasks as independent) lowers answer quality but not correctness. Cost: the
+planner prompt and schema are now more demanding.

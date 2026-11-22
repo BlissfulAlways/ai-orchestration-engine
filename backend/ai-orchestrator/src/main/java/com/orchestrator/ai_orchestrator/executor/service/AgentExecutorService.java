@@ -26,6 +26,8 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -52,6 +54,7 @@ import java.util.stream.Collectors;
  *
  * <p>Concurrency is capped by {@code orchestrator.executor.max-workers} (default 3), because
  * every running task makes model calls and the provider limits how many are allowed at once.
+ * Independent tasks of one job can occupy several workers at the same time.
  *
  * <p>While the Gemini circuit breaker is open the poller starts nothing: tasks wait in the
  * queue, and a task that is caught mid-run by an outage goes back to the queue WITHOUT using up
@@ -256,11 +259,14 @@ public class AgentExecutorService {
                 .orElseThrow(() -> new PermanentTaskFailure(
                         "PLANNED_TASK_NOT_FOUND: " + queuedTask.getPlannedTaskId()));
 
+        // The task is runnable only because its dependencies are SETTLED, which includes
+        // "failed". Running on top of a failed dependency would waste model calls, so fail now.
+        List<Dependency> dependencies = loadDependencies(queuedTask.getJobId(), plannedTask);
+        failIfDependencyDidNotSucceed(dependencies);
+
         List<ToolDefinition> availableTools = toolDefinitionRepository.findByIsActiveTrue();
         List<AgentExecutionStep> previousSteps = agentExecutionStepRepository
                 .findByTaskQueueIdOrderByStepNumberAsc(queuedTask.getId());
-        String priorTaskContext = buildPriorTaskContext(
-                queuedTask.getJobId(), plannedTask.getSequenceNumber());
 
         return agentLoopService.runLoop(
                 queuedTask.getJobId(),
@@ -268,7 +274,7 @@ public class AgentExecutorService {
                 plannedTask.getTaskDescription(),
                 availableTools,
                 previousSteps,
-                priorTaskContext);
+                buildDependencyContext(dependencies));
     }
 
     /**
@@ -330,8 +336,9 @@ public class AgentExecutorService {
     }
 
     /**
-     * True when retrying cannot help: a missing planned task, or a model error marked
-     * non-retryable (bad API key, blocked prompt). Looks through wrapped exceptions too.
+     * True when retrying cannot help: a missing planned task, a failed dependency, or a model
+     * error marked non-retryable (bad API key, blocked prompt). Looks through wrapped
+     * exceptions too.
      */
     private boolean isPermanent(Throwable error) {
         for (Throwable current = error; current != null; current = current.getCause()) {
@@ -362,31 +369,60 @@ public class AgentExecutorService {
                 Map.of("taskQueueId", queuedTask.getId().toString(), "reason", reason));
     }
 
-    /**
-     * Builds the "results so far" text for a task from the earlier tasks of the same job.
-     * Returns null for the first task or when nothing earlier completed.
-     */
-    private String buildPriorTaskContext(UUID jobId, int currentSequenceNumber) {
-        if (currentSequenceNumber <= 1) {
-            return null;
+    // ---------------------------------------------------------------- dependencies
+
+    /** One task this task depends on, with its result (null if it somehow has none). */
+    private record Dependency(PlannedTask task, TaskResult result) {
+        boolean succeeded() {
+            return result != null
+                    && result.getStatus() == TaskResultStatus.COMPLETED
+                    && result.getResultContent() != null;
         }
+    }
 
-        Map<UUID, PlannedTask> taskById = plannedTaskRepository
-                .findByJobIdOrderBySequenceNumberAsc(jobId).stream()
-                .collect(Collectors.toMap(PlannedTask::getId, Function.identity()));
+    /** The tasks named in {@code task.dependsOn}, in plan order, each with its result. */
+    private List<Dependency> loadDependencies(UUID jobId, PlannedTask task) {
+        Integer[] declared = task.getDependsOn();
+        if (declared == null || declared.length == 0) {
+            return List.of();
+        }
+        Set<Integer> wanted = new HashSet<>(Arrays.asList(declared));
 
+        Map<UUID, TaskResult> resultByTaskId = taskResultRepository.findByJobId(jobId).stream()
+                .collect(Collectors.toMap(TaskResult::getPlannedTaskId, Function.identity(), (first, second) -> first));
+
+        return plannedTaskRepository.findByJobIdOrderBySequenceNumberAsc(jobId).stream()
+                .filter(planned -> wanted.contains(planned.getSequenceNumber()))
+                .map(planned -> new Dependency(planned, resultByTaskId.get(planned.getId())))
+                .toList();
+    }
+
+    /** Fails the task without any model call if something it needs did not succeed. */
+    private void failIfDependencyDidNotSucceed(List<Dependency> dependencies) {
+        for (Dependency dependency : dependencies) {
+            if (!dependency.succeeded()) {
+                throw new PermanentTaskFailure("DEPENDENCY_FAILED: task "
+                        + dependency.task().getSequenceNumber() + " (" + dependency.task().getTaskDescription()
+                        + ") did not succeed");
+            }
+        }
+    }
+
+    /**
+     * The "results so far" text: only the results of the tasks this one depends on, and of no
+     * others. Returns null when the task has no dependencies.
+     */
+    private String buildDependencyContext(List<Dependency> dependencies) {
         StringBuilder context = new StringBuilder();
-        for (TaskResult result : taskResultRepository.findByJobId(jobId)) {
-            if (result.getStatus() != TaskResultStatus.COMPLETED || result.getResultContent() == null) {
-                continue;
+        for (Dependency dependency : dependencies) {
+            if (!dependency.succeeded()) {
+                continue; // Already rejected by failIfDependencyDidNotSucceed; defensive only.
             }
-            PlannedTask task = taskById.get(result.getPlannedTaskId());
-            if (task != null && task.getSequenceNumber() < currentSequenceNumber) {
-                context.append("Task ").append(task.getSequenceNumber())
-                        .append(" (").append(task.getRequiredAgentType()).append("): ")
-                        .append(task.getTaskDescription()).append("\n")
-                        .append("Result: ").append(result.getResultContent()).append("\n\n");
-            }
+            PlannedTask task = dependency.task();
+            context.append("Task ").append(task.getSequenceNumber())
+                    .append(" (").append(task.getRequiredAgentType()).append("): ")
+                    .append(task.getTaskDescription()).append("\n")
+                    .append("Result: ").append(dependency.result().getResultContent()).append("\n\n");
         }
         return context.length() > 0 ? context.toString() : null;
     }

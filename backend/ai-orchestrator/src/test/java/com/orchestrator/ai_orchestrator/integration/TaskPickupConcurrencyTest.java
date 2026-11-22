@@ -21,6 +21,7 @@ import org.springframework.test.annotation.DirtiesContext;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -40,7 +41,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Proves the claim at the heart of the executor: when many workers ask for work at the same
- * moment, each task is handed to exactly one of them, and a job's tasks come out in order.
+ * moment, each task is handed to exactly one of them, and a task is released only when the
+ * tasks it depends on are settled.
  *
  * <p>The background poller is switched off (very long delays), so ONLY this test claims tasks.
  */
@@ -72,7 +74,7 @@ class TaskPickupConcurrencyTest extends AbstractPostgresTest {
     void everyTaskIsClaimedExactlyOnceWhenEightThreadsCompete() throws Exception {
         int jobCount = 30;
         for (int i = 0; i < jobCount; i++) {
-            createJobWithTasks("single-task-job-" + i, 1); // one task each, all claimable at once
+            createJob("single-task-job-" + i, new int[][] {{}}); // one task, no dependencies
         }
 
         // Each thread keeps claiming until the queue is empty.
@@ -96,49 +98,66 @@ class TaskPickupConcurrencyTest extends AbstractPostgresTest {
     }
 
     @Test
-    void tasksOfOneJobComeOutInPlanOrderAndAFailedTaskDoesNotBlockTheRest() throws Exception {
-        Map<UUID, Integer> sequenceByPlannedTaskId = createJobWithTasks("ordered-job", 5);
+    void aChainOfTasksComesOutInOrderAndAFailedTaskDoesNotBlockTheRest() throws Exception {
+        // 1 <- 2 <- 3 <- 4 <- 5: each task depends on the one before it.
+        Map<UUID, Integer> sequenceByPlannedTaskId = createJob("chain-job",
+                new int[][] {{}, {1}, {2}, {3}, {4}});
 
         for (int round = 1; round <= 5; round++) {
             // Eight threads each try once. Only the task whose turn it is may be handed out.
-            List<QueuedTask> claimed = runConcurrently(8, () -> {
-                Optional<QueuedTask> task = taskQueueRepository.atomicPickup(AGENT_TYPE, Instant.now());
-                return task.map(List::of).orElseGet(List::of);
-            });
+            List<QueuedTask> claimed = claimOnceConcurrently(8);
 
             assertEquals(1, claimed.size(), "round " + round + ": exactly one task may be claimed");
             QueuedTask task = claimed.get(0);
             assertEquals(round, (int) sequenceByPlannedTaskId.get(task.getPlannedTaskId()),
-                    "round " + round + ": tasks must come out in plan order");
+                    "round " + round + ": tasks must come out in chain order");
 
-            // Settle the task. Round 3 FAILS on purpose: a failed task still counts as settled,
-            // so the job must carry on with task 4.
-            TaskResultStatus outcome = round == 3 ? TaskResultStatus.FAILED : TaskResultStatus.COMPLETED;
-            Instant now = Instant.now();
-            taskResultRepository.save(TaskResult.builder()
-                    .jobId(task.getJobId())
-                    .plannedTaskId(task.getPlannedTaskId())
-                    .status(outcome)
-                    .resultContent(outcome == TaskResultStatus.COMPLETED ? "ok" : null)
-                    .failureReason(outcome == TaskResultStatus.FAILED ? "failed on purpose" : null)
-                    .createdAt(now)
-                    .updatedAt(now)
-                    .build());
+            // Round 3 FAILS on purpose: a failed task still counts as settled, so task 4 is
+            // released (the executor then fails it without calling the model).
+            settle(task, round == 3 ? TaskResultStatus.FAILED : TaskResultStatus.COMPLETED);
         }
 
         assertTrue(taskQueueRepository.atomicPickup(AGENT_TYPE, Instant.now()).isEmpty(),
                 "nothing is left to claim after the fifth task");
     }
 
+    @Test
+    void independentTasksAreReleasedTogetherAndADependentWaitsForAllItsDependencies() throws Exception {
+        // Diamond: tasks 1 and 2 need nothing; task 3 needs BOTH.
+        Map<UUID, Integer> sequenceByPlannedTaskId = createJob("diamond-job",
+                new int[][] {{}, {}, {1, 2}});
+
+        // Round A: eight threads compete. Exactly tasks 1 and 2 may be handed out, and not task 3.
+        List<QueuedTask> firstRound = claimOnceConcurrently(8);
+        Set<Integer> firstRoundSequences = new HashSet<>();
+        firstRound.forEach(task -> firstRoundSequences.add(sequenceByPlannedTaskId.get(task.getPlannedTaskId())));
+        assertEquals(2, firstRound.size(), "the two independent tasks are claimed together");
+        assertEquals(Set.of(1, 2), firstRoundSequences);
+
+        // Task 1 finishes; task 3 still waits because task 2 is not settled.
+        QueuedTask taskOne = firstRound.stream()
+                .filter(task -> sequenceByPlannedTaskId.get(task.getPlannedTaskId()) == 1).findFirst().orElseThrow();
+        QueuedTask taskTwo = firstRound.stream()
+                .filter(task -> sequenceByPlannedTaskId.get(task.getPlannedTaskId()) == 2).findFirst().orElseThrow();
+        settle(taskOne, TaskResultStatus.COMPLETED);
+        assertTrue(claimOnceConcurrently(8).isEmpty(), "task 3 must wait until task 2 is settled too");
+
+        // Task 2 finishes; now exactly one thread gets task 3.
+        settle(taskTwo, TaskResultStatus.COMPLETED);
+        List<QueuedTask> lastRound = claimOnceConcurrently(8);
+        assertEquals(1, lastRound.size());
+        assertEquals(3, (int) sequenceByPlannedTaskId.get(lastRound.get(0).getPlannedTaskId()));
+    }
+
     // ------------------------------------------------------------------ helpers
 
     /**
-     * Creates a job in EXECUTING with {@code taskCount} planned tasks (sequence 1..n) and one
-     * PENDING queue entry per task.
+     * Creates a job in EXECUTING with one planned task per row of {@code dependencies}, and one
+     * PENDING queue entry per task. Row i lists the sequence numbers task i+1 depends on.
      *
      * @return planned task id -> sequence number, in plan order
      */
-    private Map<UUID, Integer> createJobWithTasks(String goal, int taskCount) {
+    private Map<UUID, Integer> createJob(String goal, int[][] dependencies) {
         Instant now = Instant.now();
         Job job = jobRepository.save(Job.builder()
                 .userId("test-user")
@@ -149,12 +168,16 @@ class TaskPickupConcurrencyTest extends AbstractPostgresTest {
                 .build());
 
         Map<UUID, Integer> sequenceByPlannedTaskId = new LinkedHashMap<>();
-        for (int sequence = 1; sequence <= taskCount; sequence++) {
+        for (int index = 0; index < dependencies.length; index++) {
+            int sequence = index + 1;
+            Integer[] dependsOn = java.util.Arrays.stream(dependencies[index]).boxed().toArray(Integer[]::new);
+
             PlannedTask planned = plannedTaskRepository.save(PlannedTask.builder()
                     .jobId(job.getId())
                     .sequenceNumber(sequence)
                     .taskDescription("task " + sequence + " of " + goal)
                     .requiredAgentType(AGENT_TYPE)
+                    .dependsOn(dependsOn)
                     .createdAt(now)
                     .build());
             taskQueueRepository.save(QueuedTask.builder()
@@ -168,6 +191,28 @@ class TaskPickupConcurrencyTest extends AbstractPostgresTest {
             sequenceByPlannedTaskId.put(planned.getId(), sequence);
         }
         return sequenceByPlannedTaskId;
+    }
+
+    /** Records the task's result, which is what "settled" means to the claim query. */
+    private void settle(QueuedTask task, TaskResultStatus outcome) {
+        Instant now = Instant.now();
+        taskResultRepository.save(TaskResult.builder()
+                .jobId(task.getJobId())
+                .plannedTaskId(task.getPlannedTaskId())
+                .status(outcome)
+                .resultContent(outcome == TaskResultStatus.COMPLETED ? "ok" : null)
+                .failureReason(outcome == TaskResultStatus.FAILED ? "failed on purpose" : null)
+                .createdAt(now)
+                .updatedAt(now)
+                .build());
+    }
+
+    /** Every thread tries to claim ONE task at the same instant; returns what was handed out. */
+    private List<QueuedTask> claimOnceConcurrently(int threads) throws Exception {
+        return runConcurrently(threads, () -> {
+            Optional<QueuedTask> task = taskQueueRepository.atomicPickup(AGENT_TYPE, Instant.now());
+            return task.map(List::of).orElseGet(List::of);
+        });
     }
 
     /**

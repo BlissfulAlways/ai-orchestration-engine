@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.orchestrator.ai_orchestrator.common.AgentTypes;
 import com.orchestrator.ai_orchestrator.common.ErrorMessages;
 import com.orchestrator.ai_orchestrator.common.TextUtils;
+import com.orchestrator.ai_orchestrator.llmgateway.service.GeminiContents;
 import com.orchestrator.ai_orchestrator.llmgateway.service.LlmGatewayService;
 import com.orchestrator.ai_orchestrator.llmgateway.service.LlmRequest;
 import com.orchestrator.ai_orchestrator.llmgateway.service.LlmResponse;
@@ -25,12 +26,16 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Turns a goal into an ordered list of tasks.
+ * Turns a goal into a set of tasks with dependencies.
  *
  * <p>The model is told the exact JSON shape to return (a response schema), so the answer
- * arrives as clean JSON, and each task is still validated here. There is no transaction around
- * the model call: a database connection is not held while waiting for the LLM. All tasks are
- * saved at the end in a single saveAll, which is all-or-nothing.
+ * arrives as clean JSON, and each task is still validated here. Every task lists the numbers
+ * of the EARLIER tasks it needs ({@code dependsOn}); tasks with no unmet dependencies run at
+ * the same time. Because a task may only name earlier tasks, a dependency cycle is impossible.
+ *
+ * <p>There is no transaction around the model call: a database connection is not held while
+ * waiting for the LLM. All tasks are saved at the end in a single saveAll, which is
+ * all-or-nothing.
  */
 @Slf4j
 @Service
@@ -75,8 +80,7 @@ public class PlannerService {
                     jobId,
                     "TASK_PLANNER",
                     buildSystemPrompt(),
-                    List.of(com.orchestrator.ai_orchestrator.llmgateway.service.GeminiContents
-                            .user(buildUserPrompt(goal, problemWithPreviousPlan))),
+                    List.of(GeminiContents.user(buildUserPrompt(goal, problemWithPreviousPlan))),
                     null,
                     buildPlanSchema(),
                     PLANNER_TEMPERATURE));
@@ -115,21 +119,58 @@ public class PlannerService {
         }
 
         List<PlanDraft> drafts = new ArrayList<>();
+        int position = 0; // Task numbers start at 1, in the order the model listed them.
         for (JsonNode node : root) {
+            position++;
             String description = node.path("taskDescription").asText("").trim();
             String agentType = node.path("requiredAgentType").asText("").trim();
 
             if (description.isEmpty()) {
-                throw new InvalidPlanException("a task had an empty taskDescription");
+                throw new InvalidPlanException("task " + position + " had an empty taskDescription");
             }
             if (!AgentTypes.ALL.contains(agentType)) {
-                throw new InvalidPlanException("a task used the unknown requiredAgentType '"
+                throw new InvalidPlanException("task " + position + " used the unknown requiredAgentType '"
                         + TextUtils.truncate(agentType, 50) + "'; allowed values are " + AgentTypes.ALL);
             }
             drafts.add(new PlanDraft(
-                    TextUtils.truncate(description, MAX_TASK_DESCRIPTION_CHARS), agentType));
+                    TextUtils.truncate(description, MAX_TASK_DESCRIPTION_CHARS),
+                    agentType,
+                    parseDependencies(node.path("dependsOn"), position)));
         }
         return drafts;
+    }
+
+    /**
+     * Reads one task's dependency list and checks the rule that makes cycles impossible:
+     * a task may depend only on EARLIER tasks (numbers 1 to position-1).
+     *
+     * <p>If the field is missing altogether, the task is made to depend on the previous task.
+     * That is the safe reading: it behaves like the old strict order instead of running
+     * something too early.
+     */
+    private List<Integer> parseDependencies(JsonNode dependsOn, int position) {
+        if (dependsOn.isMissingNode() || dependsOn.isNull()) {
+            return position > 1 ? List.of(position - 1) : List.of();
+        }
+        if (!dependsOn.isArray()) {
+            throw new InvalidPlanException("task " + position + ": dependsOn must be an array of task numbers");
+        }
+
+        List<Integer> dependencies = new ArrayList<>();
+        for (JsonNode item : dependsOn) {
+            if (!item.isInt()) {
+                throw new InvalidPlanException("task " + position + ": dependsOn may contain only task numbers");
+            }
+            int dependency = item.asInt();
+            if (dependency < 1 || dependency >= position) {
+                throw new InvalidPlanException("task " + position + " lists dependency " + dependency
+                        + ", but a task may only depend on earlier tasks (1 to " + (position - 1) + ")");
+            }
+            if (!dependencies.contains(dependency)) {
+                dependencies.add(dependency);
+            }
+        }
+        return dependencies;
     }
 
     /** All tasks are saved together: either every task exists afterwards, or none do. */
@@ -143,6 +184,7 @@ public class PlannerService {
                     .sequenceNumber(sequenceNumber++)
                     .taskDescription(draft.taskDescription())
                     .requiredAgentType(draft.requiredAgentType())
+                    .dependsOn(draft.dependsOn().toArray(new Integer[0]))
                     .createdAt(now)
                     .build());
         }
@@ -151,11 +193,14 @@ public class PlannerService {
 
     private String buildSystemPrompt() {
         return """
-                You are a task planning AI. Break the user's goal into an ordered list of sub-tasks.
+                You are a task planning AI. Break the user's goal into a list of sub-tasks.
 
                 Rules:
                 - Return between 1 and %d tasks. Use as few as the goal needs; a simple question needs 1 or 2.
-                - Tasks run strictly in order. Each task automatically receives the results of the tasks before it, so later tasks can build on earlier ones.
+                - Number the tasks 1, 2, 3 ... in the order you list them.
+                - Every task has a dependsOn list: the numbers of EARLIER tasks whose results it needs. A task may only depend on a task listed before it.
+                - Use an empty dependsOn list when a task needs nothing from other tasks. Tasks whose dependencies are finished run AT THE SAME TIME, so put independent work (for example researching two separate topics) in separate tasks with no dependency between them.
+                - A task automatically receives the results of the tasks in its dependsOn list, and of no others.
                 - Every taskDescription must be specific and understandable on its own.
                 - Use RESEARCH_AGENT for tasks that need information looked up on the web.
                 - Use WRITER_AGENT for tasks that write, summarize or reformat using information that is already available.
@@ -172,7 +217,7 @@ public class PlannerService {
         return prompt.toString();
     }
 
-    /** The exact JSON shape the model must return: an array of {taskDescription, requiredAgentType}. */
+    /** The exact JSON shape the model must return: an array of {taskDescription, requiredAgentType, dependsOn}. */
     private ObjectNode buildPlanSchema() {
         ObjectNode schema = objectMapper.createObjectNode();
         schema.put("type", "ARRAY");
@@ -191,11 +236,15 @@ public class PlannerService {
         ArrayNode allowed = agentType.putArray("enum");
         AgentTypes.ALL.forEach(allowed::add);
 
-        item.putArray("required").add("taskDescription").add("requiredAgentType");
+        ObjectNode dependsOn = properties.putObject("dependsOn");
+        dependsOn.put("type", "ARRAY");
+        dependsOn.putObject("items").put("type", "INTEGER");
+
+        item.putArray("required").add("taskDescription").add("requiredAgentType").add("dependsOn");
         return schema;
     }
 
-    private record PlanDraft(String taskDescription, String requiredAgentType) {}
+    private record PlanDraft(String taskDescription, String requiredAgentType, List<Integer> dependsOn) {}
 
     /** The model's plan broke a rule. Carries a reason that is shown back to the model. */
     private static final class InvalidPlanException extends RuntimeException {

@@ -31,7 +31,7 @@ POST /api/v1/jobs {"goal": "..."}  ->  202 Accepted + jobId           (client is
 
   PLANNING     the LLM returns a task list as validated JSON (one correction round if invalid)
   ROUTING      every task is matched to an agent; all tasks are queued, or none
-  EXECUTING    a bounded worker pool claims tasks in plan order; each task runs an agent loop
+  EXECUTING    a bounded worker pool claims tasks whose dependencies are done; each task runs an agent loop
                that may call web_search and fetch_page
   AGGREGATING  exactly one thread wins the claim and has the LLM write the final answer
 ```
@@ -122,7 +122,7 @@ cd backend/ai-orchestrator && ./mvnw verify     # needs Docker; CI runs the same
 
 | Layer | What it proves |
 |---|---|
-| Concurrency (real PostgreSQL via Testcontainers) | 8 threads, 30 tasks: each claimed exactly once; a job's tasks come out in plan order; a failed task does not block the rest |
+| Concurrency (real PostgreSQL via Testcontainers) | 8 threads, 30 tasks: each claimed exactly once; a task is released only when its dependencies are settled; independent tasks are claimed together; a failed task does not block unrelated work |
 | Pipeline (real PostgreSQL, fake LLM) | goal to final answer; partial failure; recovery of an abandoned job (planner called exactly once) |
 | Unit | circuit breaker (controllable clock), SSRF rules, API-key handling, entity equality |
 
@@ -141,8 +141,7 @@ quota and no network.
 
 Version 1 of the API. Known limits and planned work:
 
-1. **Parallel tasks.** Tasks of one job currently run in sequence. Next: tasks declare
-   dependencies, and independent tasks run in parallel.
+1. **Scheduling.** Independent tasks run in parallel, but there is no per-job priority or cost budget yet.
 2. **Identity.** API keys and one admin token; a company deployment would use OAuth 2 / OIDC.
 3. **Load testing.** Correctness under concurrency is tested; throughput and latency under
    load have not been measured yet.

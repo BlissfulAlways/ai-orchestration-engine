@@ -86,7 +86,7 @@ Who performs each transition:
 | Table | Purpose |
 |---|---|
 | `jobs` | One row per job: owner, goal, status, final answer link, failure reason |
-| `planned_tasks` | The plan: ordered tasks with the agent type each needs |
+| `planned_tasks` | The plan: tasks, the agent type each needs, and `depends_on` (sequence numbers of the earlier tasks it needs) |
 | `task_queue` | One entry per task: PENDING, PROCESSING, COMPLETED, FAILED; retry count; heartbeat |
 | `task_results` | One result per task (unique on `planned_task_id`), so a repeated attempt cannot duplicate |
 | `agent_execution_steps` | Every model thought, tool call and tool result: the trace |
@@ -102,8 +102,7 @@ changes the schema.
 ## Concurrency model
 
 - **Claiming a task** is one statement: `UPDATE ... WHERE id = (SELECT ... FOR UPDATE OF q SKIP LOCKED LIMIT 1) RETURNING *`.
-  The subselect also requires every earlier task of the same job to have a settled result,
-  which enforces plan order. Locked rows are skipped, not waited for.
+  The subselect also requires every task listed in the candidate's `depends_on` to have a settled result, so independent tasks of one job are released together and a dependent task waits for all of its dependencies. Locked rows are skipped, not waited for.
 - **Threads:** virtual threads for pipelines and workers (cheap to block on I/O); a 6-thread
   scheduler so a slow scheduled method cannot block the rescuer; a semaphore bounds
   concurrent model calls (default 2) and is held only while a request is in flight, never
@@ -119,7 +118,7 @@ changes the schema.
 | Provider rate limit or outage | HTTP 408/429/5xx, timeouts, network errors | Retry up to 5 times: 2 s base, doubling, capped at 60 s, equal jitter, honouring the server's retry hint |
 | Provider still failing | 5 failures in a row | Circuit breaker OPEN for 60 s; the poller starts no tasks; running tasks return to the queue without using a retry; then one probe call decides |
 | Invalid plan from the model | Validation of JSON, agent types, task count | Tell the model what was wrong; one more attempt; then the job fails with the reason |
-| Task fails permanently (blocked prompt, bad key) | Non-retryable error | Task marked FAILED at once; the job continues |
+| Task fails permanently (blocked prompt, bad key) | Non-retryable error | Task marked FAILED at once; tasks that depend on it fail immediately with DEPENDENCY_FAILED, without a model call; unrelated tasks continue |
 | Task fails temporarily | Retryable error | Back to PENDING, retry count + 1, up to 3 |
 | Worker dies | No heartbeat for 120 s | Re-queued; failed after 3 attempts |
 | Application crash | Job not updated for 10 minutes and no pipeline running here | Recovery resumes by status: re-plan if no plan, re-route, re-aggregate |
