@@ -12,12 +12,14 @@ import com.orchestrator.ai_orchestrator.llmgateway.service.LlmResponse;
 import com.orchestrator.ai_orchestrator.taskqueue.domain.QueuedTask;
 import com.orchestrator.ai_orchestrator.taskqueue.domain.QueuedTaskStatus;
 import com.orchestrator.ai_orchestrator.taskqueue.infrastructure.TaskQueueRepository;
+import com.orchestrator.ai_orchestrator.apigateway.service.JobProgressService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+
 
 import java.time.Duration;
 import java.time.Instant;
@@ -65,6 +67,7 @@ class JobPipelineTest extends AbstractPostgresTest {
 
     @Autowired private JobService jobService;
     @Autowired private JobQueryService jobQueryService;
+    @Autowired private JobProgressService jobProgressService;
     @Autowired private JobRepository jobRepository;
     @Autowired private TaskQueueRepository taskQueueRepository;
 
@@ -161,6 +164,25 @@ class JobPipelineTest extends AbstractPostgresTest {
         verify(llm, times(1)).generate(argThat(request ->
                 "TASK_PLANNER".equals(request.callingComponent())
                         && abandoned.getId().equals(request.jobId())));
+    }
+
+    @Test
+    void progressAddsUpAndIsPrivateToTheOwner() {
+        UUID jobId = jobService.submitJob("test-user", "scenario-happy");
+        awaitFinalStatus(jobId);
+
+        JobProgressService.Progress progress =
+                jobProgressService.getProgress(jobId, "test-user").orElseThrow();
+
+        assertEquals("COMPLETED", progress.jobStatus());
+        assertEquals(2, progress.totalTasks());
+        assertEquals(2, progress.completed());
+        assertEquals(0, progress.failed());
+        assertEquals(0, progress.running());
+        assertEquals(0, progress.pending());
+        assertEquals(100, progress.percentComplete());
+        assertTrue(jobProgressService.getProgress(jobId, "someone-else").isEmpty(),
+                "another user must not see this job's progress");
     }
 
     // ------------------------------------------------------------------ helpers

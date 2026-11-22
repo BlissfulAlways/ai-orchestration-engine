@@ -1,120 +1,152 @@
-# ai-orchestration-engine
-A system which takes a task, breaks it into subtasks, routes the subtasks to specialized AI agents, and returns one coherent answer
+# AI Orchestration Engine
 
-## Architecture
+[![CI](https://github.com/BlissfulAlways/ai-orchestration-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/BlissfulAlways/ai-orchestration-engine/actions/workflows/ci.yml)
+![Java 21](https://img.shields.io/badge/Java-21-orange)
+![Spring Boot 3.5](https://img.shields.io/badge/Spring%20Boot-3.5-brightgreen)
+![PostgreSQL 15](https://img.shields.io/badge/PostgreSQL-15-blue)
 
-The system is composed of 17 derived components — 7 processing, 9 storage, 1 observability — each derived from first principles by following data flow through the system.
+A backend service that turns a goal written in plain English into a finished answer. An LLM
+plans the work, agents carry out each task using web search and page fetching, and a final
+step combines the results. The engineering focus is **reliability**: the system keeps its
+promises when the model provider runs out of quota, when the process crashes mid-job, when
+workers die, and when tasks fail.
 
-User Goal → API Gateway → Task Planner → Task Router → Task Queue
-                                                            ↓
-                                                            Agent Executor (loop)
-                                                            ↓
-                                                            Result Store
-                                                            ↓
-                                                            Result Aggregator
-                                                            ↓
-                                                            Final Answer
+## At a glance
 
-## Components
-
-| Component | Responsibility |
+| | |
 |---|---|
-| API Gateway | Receives goals, returns job ID, serves results |
-| Task Planner | Breaks goal into ordered sub-tasks via LLM |
-| Task Router | Assigns each sub-task to correct agent type |
-| Task Queue | Durable PostgreSQL-backed queue with atomic pickup |
-| Agent Executor | Runs think-act-observe loop per task |
-| LLM Gateway | Single entry point for all Gemini API calls with rate limit backoff |
-| Result Aggregator | Synthesizes all sub-task results into final answer |
-| Observer | Structured event logging across all components |
+| **Problem** | LLM workflows are slow (minutes), expensive, rate-limited and unreliable. A naive implementation loses work on a crash, double-runs tasks, and burns quota when the provider is down. |
+| **Approach** | A durable job pipeline on PostgreSQL: every step is persisted, every state change is atomic, every step can be safely repeated. |
+| **Stack** | Java 21 (virtual threads), Spring Boot 3.5, PostgreSQL 15, Flyway, Gemini (native function calling), Tavily, Testcontainers |
+| **Quality gate** | 46 automated tests, including concurrency and crash-recovery tests on a real PostgreSQL; CI runs them on every push |
 
-## Technical Decisions
+## How it works
 
-- **PostgreSQL for everything** — relational data, JSONB columns, durable task queue, event logs. Zero polyglot complexity.
-- **Atomic task pickup** — `FOR UPDATE SKIP LOCKED` prevents duplicate execution under concurrent executors.
-- **@Transactional on planning and routing** — partial writes on crash leave no orphaned data.
-- **Gemini 2.5 Flash** — strongest available free-tier model with retry-after backoff on rate limits.
-- **No LangChain** — agent loop, prompt construction, and LLM communication written from scratch to demonstrate genuine understanding.
-- **Virtual threads** — async pipeline uses Java 21 virtual threads via `Thread.ofVirtual()`.
+```
+POST /api/v1/jobs {"goal": "..."}  ->  202 Accepted + jobId           (client is never blocked)
 
-## Stack
+  RECEIVED -> PLANNING -> ROUTING -> EXECUTING -> AGGREGATING -> COMPLETED
+                                                                 COMPLETED_WITH_ERRORS
+                                                                 FAILED
 
-- Java 21, Spring Boot 3.x
-- PostgreSQL 15
-- Gemini 2.5 Flash API
-- React (frontend — in progress)
-- Flyway for schema versioning
-- GitHub Actions for CI
-
-## Running Locally
-
-### Prerequisites
-- Java 21
-- Docker
-- Gemini API key from https://aistudio.google.com/apikey
-
-### Start PostgreSQL
-
-```bash
-docker run --name orchestrator-db \
-  -e POSTGRES_USER=orchestrator \
-  -e POSTGRES_PASSWORD=orchestrator \
-  -e POSTGRES_DB=orchestratordb \
-  -p 5432:5432 \
-  -d postgres:15
+  PLANNING     the LLM returns a task list as validated JSON (one correction round if invalid)
+  ROUTING      every task is matched to an agent; all tasks are queued, or none
+  EXECUTING    a bounded worker pool claims tasks in plan order; each task runs an agent loop
+               that may call web_search and fetch_page
+  AGGREGATING  exactly one thread wins the claim and has the LLM write the final answer
 ```
 
-### Set API Key
-
-```bash
-export GEMINI_API_KEY=your_key_here
+```
+ client --> API gateway --> planner --> router --> task queue (PostgreSQL) --> worker pool
+            (auth, limits)                         FOR UPDATE SKIP LOCKED     (virtual threads)
+                                                                                   |
+ final answer <-- aggregator <-- result store <-- agent loop --> tools (SSRF-safe) |
+                                                       |                           |
+                                                  LLM gateway (retries, circuit breaker)
 ```
 
-### Run Backend
+More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Reliability
+
+| Failure | Behaviour |
+|---|---|
+| Gemini out of quota or down | Retry with exponential backoff and jitter, then a **circuit breaker** stops all calls; queued work waits and loses nothing; one probe call after the cooldown |
+| Process crashes mid-job | A recovery scheduler resumes the job from the step it reached, without repeating finished work |
+| A worker dies | Tasks send heartbeats; silent tasks are re-queued, or failed after 3 attempts |
+| Two workers want the same task | One SQL statement claims it (`FOR UPDATE SKIP LOCKED`); verified by a test: 30 tasks, 8 threads, 0 duplicates |
+| One task fails permanently | The job finishes as `COMPLETED_WITH_ERRORS` and the answer names what is missing |
+
+The full list is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#failure-model).
+
+## Security
+
+API-key authentication (keys stored as SHA-256 hashes), per-user job ownership (another
+user's job answers 404), per-user concurrency limit, input size limits, SSRF protection on the
+fetch tool (private, loopback and link-local addresses blocked on every redirect hop), CORS
+allow-list, and no stack traces in error responses. Threat model:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#security-model).
+
+## Quick start
+
+Requirements: Java 21, Docker.
 
 ```bash
-cd backend/ai-orchestrator
-./mvnw spring-boot:run
+# 1. Database
+docker run --name pg -e POSTGRES_USER=orchestrator -e POSTGRES_PASSWORD=orchestrator \
+  -e POSTGRES_DB=orchestratordb -p 5432:5432 -d postgres:15
+
+# 2. Secrets (keep them out of the repository)
+export GEMINI_API_KEY=...
+export TAVILY_API_KEY=...
+export ADMIN_TOKEN=a-long-random-value-of-16-or-more-characters
+
+# 3. Run (Flyway creates the schema on first start)
+cd backend/ai-orchestrator && ./mvnw spring-boot:run
 ```
 
-### Submit a Job
-
 ```bash
-curl -X POST http://localhost:8080/api/jobs \
+# Create a key for a user, submit a job, watch it
+KEY=$(curl -s -X POST localhost:8080/api/v1/admin/keys \
+  -H "X-Admin-Token: $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"userId":"alice"}' | grep -o '"apiKey":"[^"]*"' | cut -d'"' -f4)
+
+JOB=$(curl -s -X POST localhost:8080/api/v1/jobs -H "X-API-Key: $KEY" \
   -H "Content-Type: application/json" \
-  -d '{"userId": "user-001", "goal": "Research AI trends and write a summary"}'
-```
+  -d '{"goal":"Compare PostgreSQL and MongoDB for a chat application"}' \
+  | grep -o '"jobId":"[^"]*"' | cut -d'"' -f4)
 
-### Poll for Result
-
-```bash
-curl http://localhost:8080/api/jobs/{jobId}
+curl -s -H "X-API-Key: $KEY" localhost:8080/api/v1/jobs/$JOB/progress
+curl -s -H "X-API-Key: $KEY" localhost:8080/api/v1/jobs/$JOB
 ```
 
 ## API
 
-| Method | Endpoint | Description |
+| Endpoint | Auth | Purpose |
 |---|---|---|
-| POST | /api/jobs | Submit a new goal |
-| GET | /api/jobs/{jobId} | Get job status and final answer |
+| `POST /api/v1/jobs` | user key | Submit a goal. `202` with `jobId`; `429` with `Retry-After` if too many active jobs |
+| `GET /api/v1/jobs` | user key | Your jobs, newest first (`page`, `size`) |
+| `GET /api/v1/jobs/{id}` | user key | Status, final answer, failure reason |
+| `GET /api/v1/jobs/{id}/progress` | user key | Task counts and percent complete; cheap enough to poll |
+| `GET /api/v1/jobs/{id}/trace` | user key | Every task and every agent step, for debugging |
+| `POST /api/v1/admin/keys` / `DELETE /api/v1/admin/keys/{id}` | admin token | Create and revoke API keys |
+| `GET /actuator/health` | public | Up or down; queue depth and circuit state shown to admin only |
 
-## Project Structure
-backend/ai-orchestrator/src/main/java/com/orchestrator/ai_orchestrator/
-├── apigateway/        # HTTP entry point, job lifecycle
-├── planner/           # LLM-based goal decomposition
-├── router/            # Agent type assignment
-├── taskqueue/         # Durable task queue
-├── executor/          # Agent loop execution
-├── aggregator/        # Result synthesis
-├── llmgateway/        # Gemini API client
-├── resultstore/       # Per-task result storage
-├── observer/          # System event logging
-└── config/            # Application configuration
+Errors use one JSON shape ([RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem details).
 
-## What This Demonstrates
+## Testing
 
-- Systems design from first principles — every component derived by following data flow
-- Production patterns — atomic operations, transactions, retry with backoff, crash recovery
-- Clean architecture — domain, service, infrastructure separation enforced across all packages
-- Judgment over trend-chasing — one database, two libraries, zero unnecessary complexity
-EOF
+```bash
+cd backend/ai-orchestrator && ./mvnw verify     # needs Docker; CI runs the same command
+```
+
+| Layer | What it proves |
+|---|---|
+| Concurrency (real PostgreSQL via Testcontainers) | 8 threads, 30 tasks: each claimed exactly once; a job's tasks come out in plan order; a failed task does not block the rest |
+| Pipeline (real PostgreSQL, fake LLM) | goal to final answer; partial failure; recovery of an abandoned job (planner called exactly once) |
+| Unit | circuit breaker (controllable clock), SSRF rules, API-key handling, entity equality |
+
+The pipeline tests replace the LLM with a scripted fake, so the suite needs no API key, no
+quota and no network.
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Goals, components, state machine, data model, concurrency, failure model, security model |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | Why PostgreSQL as the queue, why compare-and-set, and other decisions with the alternatives considered |
+| [docs/RUNBOOK.md](docs/RUNBOOK.md) | Diagnosing stuck jobs, quota outages, pool exhaustion |
+
+## Status and roadmap
+
+Version 1 of the API. Known limits and planned work:
+
+1. **Parallel tasks.** Tasks of one job currently run in sequence. Next: tasks declare
+   dependencies, and independent tasks run in parallel.
+2. **Identity.** API keys and one admin token; a company deployment would use OAuth 2 / OIDC.
+3. **Load testing.** Correctness under concurrency is tested; throughput and latency under
+   load have not been measured yet.
+4. **Metrics.** Health and structured logs exist; Prometheus metrics (queue depth, task
+   latency, breaker state) are not exported yet.
+5. **Egress control.** The URL check cannot stop DNS rebinding alone; production needs a
+   network-level egress policy.
