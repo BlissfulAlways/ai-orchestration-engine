@@ -18,7 +18,7 @@ workers die, and when tasks fail.
 | **Problem** | LLM workflows are slow (minutes), expensive, rate-limited and unreliable. A naive implementation loses work on a crash, double-runs tasks, and burns quota when the provider is down. |
 | **Approach** | A durable job pipeline on PostgreSQL: every step is persisted, every state change is atomic, every step can be safely repeated. |
 | **Stack** | Java 21 (virtual threads), Spring Boot 3.5, PostgreSQL 15, Flyway, Gemini (native function calling), Tavily, Testcontainers |
-| **Quality gate** | 46 automated tests, including concurrency and crash-recovery tests on a real PostgreSQL; CI runs them on every push |
+| **Quality gate** | 49 automated tests, including concurrency and crash-recovery tests on a real PostgreSQL; CI runs them on every push |
 
 ## How it works
 
