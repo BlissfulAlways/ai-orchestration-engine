@@ -33,6 +33,8 @@ import java.util.regex.Pattern;
  * <p>Guarantees:
  * <ul>
  *   <li>Retries rate-limit and server errors with exponential backoff and jitter.</li>
+ *   <li>A circuit breaker stops all calls after repeated provider failures, so a quota outage
+ *       does not make every task wait through retries and burn the remaining quota.</li>
  *   <li>The concurrency permit is held ONLY while a request is in flight. Waiting between
  *       retries holds nothing, so one rate-limited call can no longer freeze every other call.</li>
  *   <li>Every response is checked field by field; a malformed or blocked response becomes an
@@ -56,6 +58,7 @@ public class LlmGatewayService {
     private final LlmCallLogRepository llmCallLogRepository;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
+    private final LlmCircuitBreaker circuitBreaker;
     private final String apiKey;
     private final String model;
     private final String endpoint;
@@ -69,6 +72,7 @@ public class LlmGatewayService {
             LlmCallLogRepository llmCallLogRepository,
             ObjectMapper objectMapper,
             HttpClient httpClient,
+            LlmCircuitBreaker circuitBreaker,
             @Value("${gemini.api.key}") String apiKey,
             @Value("${gemini.api.model}") String model,
             @Value("${gemini.api.endpoint}") String endpoint,
@@ -79,6 +83,7 @@ public class LlmGatewayService {
         this.llmCallLogRepository = llmCallLogRepository;
         this.objectMapper = objectMapper;
         this.httpClient = httpClient;
+        this.circuitBreaker = circuitBreaker;
         this.apiKey = apiKey;
         this.model = model;
         this.endpoint = endpoint;
@@ -115,6 +120,12 @@ public class LlmGatewayService {
             promptJson = buildRequestBody(request);
 
             for (int attempt = 1; ; attempt++) {
+                // Ask BEFORE every attempt, retries included. If another thread tripped the
+                // breaker while this one was waiting to retry, this call stops at once.
+                if (!circuitBreaker.tryAcquirePermission()) {
+                    throw new CircuitOpenException(circuitBreaker.secondsUntilRetry());
+                }
+
                 boolean retryable;
                 String failure;
                 long serverSuggestedDelayMillis = -1;
@@ -124,6 +135,7 @@ public class LlmGatewayService {
                     responseBody = http.body();
 
                     if (http.statusCode() == 200) {
+                        circuitBreaker.recordSuccess(); // Gemini answered: it is healthy.
                         LlmResponse parsed = parseSuccessBody(responseBody);
                         recordCall(request, promptJson, responseBody,
                                 parsed.totalTokens(), "SUCCESS", elapsedMillis(startNanos));
@@ -133,11 +145,17 @@ public class LlmGatewayService {
                     }
 
                     retryable = isRetryableStatus(http.statusCode());
+                    if (retryable) {
+                        circuitBreaker.recordFailure();  // 408, 429, 5xx: provider cannot serve us.
+                    } else {
+                        circuitBreaker.recordSuccess();  // 400 and similar: provider is fine, request is not.
+                    }
                     failure = "HTTP " + http.statusCode() + ": "
                             + TextUtils.truncate(extractErrorMessage(responseBody), 300);
                     serverSuggestedDelayMillis = extractRetryDelayMillis(responseBody);
                 } catch (IOException e) {
                     // Network trouble and timeouts are temporary, so they are retried.
+                    circuitBreaker.recordFailure();
                     retryable = true;
                     failure = e.getClass().getSimpleName() + ": " + e.getMessage();
                 }
@@ -153,6 +171,9 @@ public class LlmGatewayService {
                         request.callingComponent(), request.jobId());
                 sleep(delayMillis); // No permit is held here.
             }
+        } catch (CircuitOpenException e) {
+            // No request was sent, so there is nothing to log in llm_call_logs.
+            throw e;
         } catch (Exception e) {
             recordCall(request, promptJson, responseBody, null, "FAILED", elapsedMillis(startNanos));
             if (e instanceof LlmException llmException) {

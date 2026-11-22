@@ -52,8 +52,9 @@ public class JobTraceService {
      *         (an empty list if the job has not been planned yet)
      */
     @Transactional(readOnly = true)
-    public Optional<List<TaskTrace>> getTrace(UUID jobId) {
-        if (!jobRepository.existsById(jobId)) {
+    public Optional<List<TaskTrace>> getTrace(UUID jobId, String userId) {
+        // Another user's job is reported as "not found", exactly like a job that does not exist.
+        if (!jobRepository.existsByIdAndUserId(jobId, userId)) {
             return Optional.empty();
         }
 

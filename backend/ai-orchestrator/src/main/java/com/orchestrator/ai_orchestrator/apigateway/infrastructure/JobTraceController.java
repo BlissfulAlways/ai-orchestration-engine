@@ -8,20 +8,22 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.security.Principal;
 import java.util.List;
 import java.util.UUID;
 
 /** HTTP layer only. All trace logic lives in {@link JobTraceService}. */
 @RestController
-@RequestMapping("/api/jobs")
+@RequestMapping("/api/v1/jobs")
 @RequiredArgsConstructor
 public class JobTraceController {
 
     private final JobTraceService jobTraceService;
 
     @GetMapping("/{jobId}/trace")
-    public ResponseEntity<List<JobTraceService.TaskTrace>> getJobTrace(@PathVariable UUID jobId) {
-        return jobTraceService.getTrace(jobId)
+    public ResponseEntity<List<JobTraceService.TaskTrace>> getJobTrace(@PathVariable UUID jobId,
+                                                                      Principal principal) {
+        return jobTraceService.getTrace(jobId, principal.getName())
                 .map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.notFound().build());
     }

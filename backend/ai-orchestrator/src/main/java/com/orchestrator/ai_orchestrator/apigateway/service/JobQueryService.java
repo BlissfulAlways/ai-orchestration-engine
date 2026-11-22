@@ -5,18 +5,20 @@ import com.orchestrator.ai_orchestrator.aggregator.infrastructure.FinalAnswerRep
 import com.orchestrator.ai_orchestrator.apigateway.domain.Job;
 import com.orchestrator.ai_orchestrator.apigateway.infrastructure.JobRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 /**
  * Read side of the job API: "what is the state of this job?".
  *
- * <p>Kept separate from {@link JobService}, which drives the pipeline. The controller used to
- * query the final-answer table itself; that logic belongs in a service so controllers only
- * translate HTTP to method calls.
+ * <p>Every method takes the caller's {@code userId} and only ever returns that user's jobs.
+ * A job owned by someone else looks exactly like a job that does not exist, so a caller cannot
+ * learn whether a job id is real.
  */
 @Service
 @RequiredArgsConstructor
@@ -30,9 +32,15 @@ public class JobQueryService {
 
     /** readOnly = true: no writes happen here, and both reads see one consistent snapshot. */
     @Transactional(readOnly = true)
-    public Optional<JobView> findJob(UUID jobId) {
-        return jobRepository.findById(jobId)
+    public Optional<JobView> findJob(UUID jobId, String userId) {
+        return jobRepository.findByIdAndUserId(jobId, userId)
                 .map(job -> new JobView(job, loadFinalAnswer(job)));
+    }
+
+    /** The user's jobs, newest first. {@code page} starts at 0. */
+    @Transactional(readOnly = true)
+    public List<Job> listJobs(String userId, int page, int size) {
+        return jobRepository.findByUserIdOrderByCreatedAtDesc(userId, PageRequest.of(page, size));
     }
 
     /**

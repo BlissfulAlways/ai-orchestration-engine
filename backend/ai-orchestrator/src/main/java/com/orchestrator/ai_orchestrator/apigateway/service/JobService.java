@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import org.slf4j.MDC;
 
 /**
  * Accepts jobs and drives them through the early pipeline: RECEIVED -> PLANNING -> ROUTING.
@@ -42,6 +43,10 @@ public class JobService {
     private final RouterService routerService;
     private final ObserverService observerService;
 
+    /** Not final, so Lombok leaves it out of the constructor and Spring fills it from the setting. */
+    @org.springframework.beans.factory.annotation.Value("${orchestrator.limits.max-active-jobs-per-user:5}")
+    private int maxActiveJobsPerUser;
+
     /**
      * Jobs whose pipeline is running inside this process right now. Lets the recovery service
      * tell "slow but alive" apart from "abandoned".
@@ -51,6 +56,16 @@ public class JobService {
     public UUID submitJob(String userId, String goal) {
         if (goal == null || goal.trim().isEmpty()) {
             throw new IllegalArgumentException("Goal cannot be empty");
+        }
+
+        // Backpressure: every active job costs model calls, and the quota is shared by all users.
+        // The check and the insert are separate statements, so two simultaneous submits can
+        // overshoot the limit by one; that is acceptable for a soft limit.
+        long activeJobs = jobRepository.countByUserIdAndStatusIn(userId, Set.of(
+                JobStatus.RECEIVED, JobStatus.PLANNING, JobStatus.ROUTING,
+                JobStatus.EXECUTING, JobStatus.AGGREGATING));
+        if (activeJobs >= maxActiveJobsPerUser) {
+            throw new TooManyJobsException(maxActiveJobsPerUser);
         }
 
         Instant now = Instant.now();
@@ -100,6 +115,7 @@ public class JobService {
     }
 
     private void runPipeline(UUID jobId) {
+        MDC.put("jobId", jobId.toString()); // Every log line from this thread now shows the job.
         try {
             Job job = jobRepository.findById(jobId)
                     .orElseThrow(() -> new IllegalStateException("Job not found: " + jobId));
@@ -127,6 +143,7 @@ public class JobService {
             failJob(jobId, e);
         } finally {
             activePipelines.remove(jobId);
+            MDC.remove("jobId");
         }
     }
 

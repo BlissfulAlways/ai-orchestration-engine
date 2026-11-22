@@ -7,6 +7,8 @@ import com.orchestrator.ai_orchestrator.executor.domain.AgentExecutionStep;
 import com.orchestrator.ai_orchestrator.executor.domain.ToolDefinition;
 import com.orchestrator.ai_orchestrator.executor.infrastructure.AgentExecutionStepRepository;
 import com.orchestrator.ai_orchestrator.executor.infrastructure.ToolDefinitionRepository;
+import com.orchestrator.ai_orchestrator.llmgateway.service.CircuitOpenException;
+import com.orchestrator.ai_orchestrator.llmgateway.service.LlmCircuitBreaker;
 import com.orchestrator.ai_orchestrator.llmgateway.service.LlmException;
 import com.orchestrator.ai_orchestrator.observer.service.ObserverService;
 import com.orchestrator.ai_orchestrator.planner.domain.PlannedTask;
@@ -18,6 +20,7 @@ import com.orchestrator.ai_orchestrator.taskqueue.domain.QueuedTask;
 import com.orchestrator.ai_orchestrator.taskqueue.infrastructure.TaskQueueRepository;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -49,6 +52,10 @@ import java.util.stream.Collectors;
  *
  * <p>Concurrency is capped by {@code orchestrator.executor.max-workers} (default 3), because
  * every running task makes model calls and the provider limits how many are allowed at once.
+ *
+ * <p>While the Gemini circuit breaker is open the poller starts nothing: tasks wait in the
+ * queue, and a task that is caught mid-run by an outage goes back to the queue WITHOUT using up
+ * one of its retries.
  */
 @Slf4j
 @Service
@@ -66,6 +73,7 @@ public class AgentExecutorService {
     private final ObserverService observerService;
     private final AggregatorTriggerService aggregatorTriggerService;
     private final TaskOutcomeService taskOutcomeService;
+    private final LlmCircuitBreaker circuitBreaker;
 
     private final int staleTaskSeconds;
     /** One permit per worker. A permit is taken when a task is claimed and returned when it ends. */
@@ -84,6 +92,7 @@ public class AgentExecutorService {
                                 ObserverService observerService,
                                 AggregatorTriggerService aggregatorTriggerService,
                                 TaskOutcomeService taskOutcomeService,
+                                LlmCircuitBreaker circuitBreaker,
                                 @Value("${orchestrator.executor.max-workers:3}") int maxWorkers,
                                 @Value("${orchestrator.executor.stale-task-seconds:120}") int staleTaskSeconds) {
         this.taskQueueRepository = taskQueueRepository;
@@ -95,14 +104,22 @@ public class AgentExecutorService {
         this.observerService = observerService;
         this.aggregatorTriggerService = aggregatorTriggerService;
         this.taskOutcomeService = taskOutcomeService;
+        this.circuitBreaker = circuitBreaker;
         this.staleTaskSeconds = staleTaskSeconds;
         this.workerSlots = new Semaphore(Math.max(1, maxWorkers));
     }
 
     // ---------------------------------------------------------------- dispatching
 
-    @Scheduled(fixedDelayString = "${orchestrator.executor.poll-interval-ms:2000}")
+    @Scheduled(fixedDelayString = "${orchestrator.executor.poll-interval-ms:2000}",
+            initialDelayString = "${orchestrator.executor.initial-delay-ms:0}")
     public void pollAndDispatch() {
+        // Gemini is refusing us: do not start work that is certain to fail. Tasks stay
+        // PENDING in the database and start again once the breaker lets a probe through.
+        if (circuitBreaker.isOpen()) {
+            return;
+        }
+
         boolean claimedAny;
         do {
             claimedAny = false;
@@ -136,9 +153,13 @@ public class AgentExecutorService {
         runningTaskIds.add(task.getId());
         try {
             workers.execute(() -> {
+                // Every log line written by this worker now carries the job and task ids.
+                MDC.put("jobId", String.valueOf(task.getJobId()));
+                MDC.put("taskQueueId", String.valueOf(task.getId()));
                 try {
                     executeTask(task);
                 } finally {
+                    MDC.clear();
                     runningTaskIds.remove(task.getId());
                     workerSlots.release();
                 }
@@ -210,9 +231,16 @@ public class AgentExecutorService {
                     Map.of("taskQueueId", queuedTask.getId().toString()));
             taskSettled = true;
         } catch (Exception e) {
-            log.error("Task execution failed taskQueueId={} jobId={}",
-                    queuedTask.getId(), queuedTask.getJobId(), e);
-            taskSettled = handleFailure(queuedTask, e);
+            if (isProviderOutage(e)) {
+                // Not the task's fault: wait for Gemini to recover, keep the retry budget.
+                log.warn("Gemini unavailable; returning task to the queue without a retry penalty "
+                        + "taskQueueId={} jobId={}", queuedTask.getId(), queuedTask.getJobId());
+                taskSettled = releaseWithoutPenalty(queuedTask);
+            } else {
+                log.error("Task execution failed taskQueueId={} jobId={}",
+                        queuedTask.getId(), queuedTask.getJobId(), e);
+                taskSettled = handleFailure(queuedTask, e);
+            }
         }
 
         // Deliberately OUTSIDE the try block: a failure while checking for aggregation must
@@ -268,6 +296,37 @@ public class AgentExecutorService {
             log.error("Could not record failure for taskQueueId={}", queuedTask.getId(), bookkeepingError);
             return false;
         }
+    }
+
+    /**
+     * True when the failure means "Gemini cannot serve us right now": the breaker refused the
+     * call, or a retryable model error happened while the breaker is open.
+     */
+    private boolean isProviderOutage(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof CircuitOpenException) {
+                return true;
+            }
+            if (current instanceof LlmException llmError
+                    && llmError.isRetryable() && circuitBreaker.isOpen()) {
+                return true;
+            }
+            if (current.getCause() == current) {
+                break;
+            }
+        }
+        return false;
+    }
+
+    /** Returns the task to the queue with its retry count unchanged. Always "not settled". */
+    private boolean releaseWithoutPenalty(QueuedTask queuedTask) {
+        try {
+            taskOutcomeService.releaseForLater(queuedTask);
+        } catch (Exception bookkeepingError) {
+            // The row stays PROCESSING; the rescuer will handle it after the heartbeat timeout.
+            log.error("Could not release taskQueueId={}", queuedTask.getId(), bookkeepingError);
+        }
+        return false;
     }
 
     /**

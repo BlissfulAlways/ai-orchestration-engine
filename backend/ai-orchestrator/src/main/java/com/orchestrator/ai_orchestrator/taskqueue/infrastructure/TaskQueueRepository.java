@@ -71,6 +71,9 @@ public interface TaskQueueRepository extends JpaRepository<QueuedTask, UUID> {
 
     List<QueuedTask> findByStatus(QueuedTaskStatus status);
 
+    /** Counts without loading rows. Used by the health check. */
+    long countByStatus(QueuedTaskStatus status);
+
     /**
      * Tasks marked PROCESSING whose last sign of life (heartbeat, or pickup time if there
      * never was a heartbeat) is older than {@code cutoff}. Their worker is presumed dead.

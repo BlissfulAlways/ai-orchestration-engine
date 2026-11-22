@@ -58,6 +58,19 @@ public class TaskOutcomeService {
         taskQueueRepository.save(queuedTask);
     }
 
+        /**
+     * Puts the task back in the queue WITHOUT using up a retry. Used when the model provider is
+     * unavailable (circuit breaker open): the task did nothing wrong, so it must not be
+     * counted toward its three allowed attempts.
+     */
+    @Transactional
+    public void releaseForLater(QueuedTask queuedTask) {
+        queuedTask.setStatus(QueuedTaskStatus.PENDING);
+        queuedTask.setPickedUpAt(null);
+        queuedTask.setHeartbeatAt(null);
+        taskQueueRepository.save(queuedTask);
+    }
+
     /**
      * Inserts the result unless one already exists. A task can be attempted twice (for example
      * after a timeout rescue while the first attempt was still finishing); the database allows

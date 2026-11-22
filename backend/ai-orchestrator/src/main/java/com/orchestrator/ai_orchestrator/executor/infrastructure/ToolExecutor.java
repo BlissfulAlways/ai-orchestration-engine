@@ -20,13 +20,15 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Runs the tools an agent may call. Tools receive their arguments as JSON, exactly as the
  * model produced them, and return plain text for the model to read.
  *
- * <p>Security note: fetch_page only accepts http/https URLs and reads a bounded amount of
- * data. Blocking private and internal addresses is planned for Phase 5.
+ * <p>Security: fetch_page sends every URL through {@link UrlSafetyValidator} (public addresses
+ * only), follows at most {@value #MAX_REDIRECTS} redirects and validates every hop, and reads
+ * a bounded amount of data.
  */
 @Slf4j
 @Component
@@ -37,16 +39,21 @@ public class ToolExecutor {
     /** Stop reading a page after this many bytes, so one huge page cannot exhaust memory. */
     private static final int MAX_FETCH_BYTES = 500_000;
     private static final int MAX_PAGE_TEXT_CHARS = 3_000;
+    private static final int MAX_REDIRECTS = 3;
+    private static final Set<Integer> REDIRECT_STATUSES = Set.of(301, 302, 303, 307, 308);
 
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
+    private final UrlSafetyValidator urlSafetyValidator;
     private final String tavilyApiKey;
 
     public ToolExecutor(ObjectMapper objectMapper,
                         HttpClient httpClient,
+                        UrlSafetyValidator urlSafetyValidator,
                         @Value("${tavily.api.key}") String tavilyApiKey) {
         this.objectMapper = objectMapper;
         this.httpClient = httpClient;
+        this.urlSafetyValidator = urlSafetyValidator;
         this.tavilyApiKey = tavilyApiKey;
     }
 
@@ -111,25 +118,40 @@ public class ToolExecutor {
     // ---------------------------------------------------------------- fetch_page
 
     private String fetchPage(String rawUrl) {
-        URI uri = parseHttpUri(rawUrl);
+        URI uri = urlSafetyValidator.validate(rawUrl);
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(uri)
-                .timeout(TOOL_REQUEST_TIMEOUT)
-                .header("User-Agent", "Mozilla/5.0")
-                .GET()
-                .build();
+        // The shared HttpClient does not follow redirects. We follow them here, one hop at a
+        // time, so that a redirect to http://169.254.169.254/ is stopped by the validator.
+        for (int hop = 0; hop <= MAX_REDIRECTS; hop++) {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(uri)
+                    .timeout(TOOL_REQUEST_TIMEOUT)
+                    .header("User-Agent", "Mozilla/5.0")
+                    .GET()
+                    .build();
 
-        HttpResponse<InputStream> response = send(request, HttpResponse.BodyHandlers.ofInputStream());
-        try (InputStream in = response.body()) {
-            if (response.statusCode() / 100 != 2) {
-                throw new IllegalStateException("Page fetch returned HTTP " + response.statusCode());
+            HttpResponse<InputStream> response = send(request, HttpResponse.BodyHandlers.ofInputStream());
+            int status = response.statusCode();
+
+            if (REDIRECT_STATUSES.contains(status)) {
+                closeQuietly(response.body());
+                String location = response.headers().firstValue("Location")
+                        .orElseThrow(() -> new IllegalStateException("Redirect without a Location header"));
+                uri = urlSafetyValidator.validate(uri.resolve(location).toString());
+                continue;
             }
-            String html = new String(in.readNBytes(MAX_FETCH_BYTES), StandardCharsets.UTF_8);
-            return TextUtils.truncate(htmlToText(html), MAX_PAGE_TEXT_CHARS);
-        } catch (IOException e) {
-            throw new IllegalStateException("Page read failed: " + ErrorMessages.describe(e), e);
+
+            try (InputStream in = response.body()) {
+                if (status / 100 != 2) {
+                    throw new IllegalStateException("Page fetch returned HTTP " + status);
+                }
+                String html = new String(in.readNBytes(MAX_FETCH_BYTES), StandardCharsets.UTF_8);
+                return TextUtils.truncate(htmlToText(html), MAX_PAGE_TEXT_CHARS);
+            } catch (IOException e) {
+                throw new IllegalStateException("Page read failed: " + ErrorMessages.describe(e), e);
+            }
         }
+        throw new IllegalStateException("Too many redirects (more than " + MAX_REDIRECTS + ")");
     }
 
     /** Crude HTML-to-text. Good enough to give the model readable content. */
@@ -146,19 +168,12 @@ public class ToolExecutor {
                 .trim();
     }
 
-    private URI parseHttpUri(String rawUrl) {
-        URI uri;
+    private void closeQuietly(InputStream stream) {
         try {
-            uri = URI.create(rawUrl.trim());
-        } catch (IllegalArgumentException e) {
-            throw new IllegalArgumentException("Invalid URL: " + TextUtils.truncate(rawUrl, 200));
+            stream.close();
+        } catch (IOException ignored) {
+            // Nothing useful can be done; the connection is simply dropped.
         }
-        String scheme = uri.getScheme();
-        boolean httpOrHttps = "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme);
-        if (!httpOrHttps || uri.getHost() == null) {
-            throw new IllegalArgumentException("Only http and https URLs are allowed");
-        }
-        return uri;
     }
 
     // ---------------------------------------------------------------- helpers

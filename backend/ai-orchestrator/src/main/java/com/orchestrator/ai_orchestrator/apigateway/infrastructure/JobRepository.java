@@ -12,7 +12,9 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
+import org.springframework.data.domain.Pageable;
 
 /**
  * Job persistence.
@@ -24,6 +26,17 @@ import java.util.UUID;
  */
 @Repository
 public interface JobRepository extends JpaRepository<Job, UUID> {
+
+    /** Ownership-aware lookup: empty if the job does not exist OR belongs to someone else. */
+    Optional<Job> findByIdAndUserId(UUID id, String userId);
+
+    boolean existsByIdAndUserId(UUID id, String userId);
+
+    /** One user's jobs, newest first, one page at a time. */
+    List<Job> findByUserIdOrderByCreatedAtDesc(String userId, Pageable pageable);
+
+    /** How many of this user's jobs are in any of the given statuses. */
+    long countByUserIdAndStatusIn(String userId, Collection<JobStatus> statuses);
 
     /** Moves a job from {@code expectedStatus} to {@code newStatus}; returns rows changed. */
     @Modifying(clearAutomatically = true, flushAutomatically = true)
