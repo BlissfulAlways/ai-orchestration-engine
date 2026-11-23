@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { submitJob } from "../api/orchestratorApi";
+import { submitJob, getApiKey, setApiKey } from "../api/orchestratorApi";
 
 export default function SubmitJob({ onJobSubmitted }) {
   const [goal, setGoal] = useState("");
+  const [apiKey, setKeyField] = useState(getApiKey());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -11,10 +12,11 @@ export default function SubmitJob({ onJobSubmitted }) {
     setLoading(true);
     setError(null);
     try {
-      const data = await submitJob("user-001", goal.trim());
+      setApiKey(apiKey.trim()); // remembered for this tab only
+      const data = await submitJob(goal.trim());
       onJobSubmitted(data.jobId);
     } catch (e) {
-      setError("Failed to submit job. Is the backend running?");
+      setError(e.message);
     } finally {
       setLoading(false);
     }
@@ -24,6 +26,14 @@ export default function SubmitJob({ onJobSubmitted }) {
     <div style={styles.container}>
       <h1 style={styles.title}>AI Orchestration Engine</h1>
       <p style={styles.subtitle}>Enter a goal and the system will break it into tasks, execute them, and return a final answer.</p>
+      <input
+        style={styles.input}
+        type="password"
+        placeholder="API key (starts with ak_)"
+        value={apiKey}
+        onChange={(e) => setKeyField(e.target.value)}
+        autoComplete="off"
+      />
       <textarea
         style={styles.textarea}
         placeholder="e.g. Research the latest trends in AI and write a summary report"
@@ -47,6 +57,7 @@ const styles = {
   container: { maxWidth: 680, margin: "80px auto", padding: "0 24px", fontFamily: "system-ui, sans-serif" },
   title: { fontSize: 28, fontWeight: 700, marginBottom: 8, color: "#111" },
   subtitle: { fontSize: 15, color: "#555", marginBottom: 24, lineHeight: 1.6 },
+  input: { width: "100%", padding: 12, fontSize: 14, borderRadius: 8, border: "1px solid #ddd", boxSizing: "border-box", outline: "none", marginBottom: 12, fontFamily: "monospace" },
   textarea: { width: "100%", padding: 14, fontSize: 15, borderRadius: 8, border: "1px solid #ddd", resize: "vertical", boxSizing: "border-box", outline: "none", lineHeight: 1.6 },
   button: { marginTop: 16, padding: "12px 28px", fontSize: 15, fontWeight: 600, background: "#111", color: "#fff", border: "none", borderRadius: 8, cursor: "pointer" },
   buttonDisabled: { background: "#999", cursor: "not-allowed" },

@@ -1,7 +1,5 @@
 import { useState, useEffect } from "react";
-import { getJob, getJobTrace } from "../api/orchestratorApi";
-
-const TERMINAL_STATUSES = ["COMPLETED", "FAILED"];
+import { getJob, getJobTrace, TERMINAL_STATUSES } from "../api/orchestratorApi";
 
 const STATUS_COLORS = {
   COMPLETED: "#27ae60",
