@@ -101,6 +101,14 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/api/v1/jobs/$JOB/progress
 curl -s -H "X-API-Key: $KEY" localhost:8080/api/v1/jobs/$JOB
 ```
 
+## Web UI
+
+A React interface shows live progress and the step-by-step agent trace.
+
+    cd frontend/ai-orchestrator-ui && npm install && npm run dev
+
+Open the printed address, paste an API key (created in the quick start above) and submit a goal. In development the Vite server forwards `/api` calls to the backend on port 8080, so no CORS setup is needed.
+
 ## API
 
 | Endpoint | Auth | Purpose |
