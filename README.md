@@ -40,7 +40,7 @@ POST /api/v1/jobs {"goal": "..."}  ->  202 Accepted + jobId           (client is
  client --> API gateway --> planner --> router --> task queue (PostgreSQL) --> worker pool
             (auth, limits)                         FOR UPDATE SKIP LOCKED     (virtual threads)
                                                                                    |
- final answer <-- aggregator <-- result store <-- agent loop --> tools (SSRF-safe) |
+ final answer <-- aggregator <-- result store <-- agent loop --> tools (SSRF-protected) |
                                                        |                           |
                                                   LLM gateway (retries, circuit breaker)
 ```
@@ -72,8 +72,9 @@ allow-list, and no stack traces in error responses. Threat model:
 Requirements: Java 21, Docker.
 
 ```bash
-# 1. Database
-docker run --name pg -e POSTGRES_USER=orchestrator -e POSTGRES_PASSWORD=orchestrator \
+# 1. Database (choose any password; it is only used by this local container)
+export DB_PASSWORD=change-me-local-only
+docker run --name pg -e POSTGRES_USER=orchestrator -e POSTGRES_PASSWORD=$DB_PASSWORD \
   -e POSTGRES_DB=orchestratordb -p 5432:5432 -d postgres:15
 
 # 2. Secrets (keep them out of the repository)
@@ -145,7 +146,7 @@ Version 1 of the API. Known limits and planned work:
 2. **Identity.** API keys and one admin token; a company deployment would use OAuth 2 / OIDC.
 3. **Load testing.** Correctness under concurrency is tested; throughput and latency under
    load have not been measured yet.
-4. **Metrics.** Health and structured logs exist; Prometheus metrics (queue depth, task
+4. **Metrics.** Health and job-tagged logs exist; Prometheus metrics (queue depth, task
    latency, breaker state) are not exported yet.
 5. **Egress control.** The URL check cannot stop DNS rebinding alone; production needs a
    network-level egress policy.

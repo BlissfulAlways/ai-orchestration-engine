@@ -14,7 +14,7 @@ order within a job. The same data (status, results) is also needed by the API.
 **Alternatives.** A message broker (Kafka, SQS, RabbitMQ); Redis lists.
 
 **Consequences.** One system to operate and back up. A claim and a result change in one
-transaction, so there is no "message delivered but result lost" gap. Per-job ordering is an SQL
+transaction, so there is no "message delivered but result lost" gap. Task dependencies are an SQL
 condition instead of a partitioning scheme. Cost: queue throughput is bounded by PostgreSQL;
 at much higher volume the next step is a broker for dispatch, keeping the database as the
 source of truth.

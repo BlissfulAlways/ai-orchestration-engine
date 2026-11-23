@@ -5,7 +5,7 @@
 **Goals**
 
 - Never lose accepted work: a job submitted survives a crash and finishes.
-- Never run a task twice at the same time, and never run a job's tasks out of order.
+- Never run a task twice at the same time, and never start a task before the tasks it depends on are settled.
 - Degrade gracefully when the model provider fails: stop wasting quota, wait, resume.
 - Give the caller a useful result even when part of the job failed.
 - Keep one user from reading another user's data or exhausting shared capacity.
@@ -96,7 +96,7 @@ Who performs each transition:
 | `event_logs` | Audit events from every component |
 | `api_keys` | Key owner and SHA-256 hash; revocation time |
 
-Schema changes are versioned Flyway migrations (`db/migration/V1` ... `V17`). Hibernate never
+Schema changes are versioned Flyway migrations (`db/migration/V1` ... `V18`). Hibernate never
 changes the schema.
 
 ## Concurrency model
